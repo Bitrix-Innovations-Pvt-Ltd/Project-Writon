@@ -1,7 +1,20 @@
-psycopg2-binary==2.9.9
-python-dotenv==1.0.1
+# Web framework
 fastapi
 uvicorn[standard]
-sentence-transformers
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy[asyncio]
+asyncpg
+pgvector
+alembic
+
+# AWS / Storage
 boto3
+
+# ML / Search
+sentence-transformers
+
+# Utils
+python-dotenv==1.0.1
 
