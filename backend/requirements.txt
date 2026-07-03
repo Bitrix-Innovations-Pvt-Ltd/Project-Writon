@@ -13,8 +13,8 @@ alembic
 boto3
 
 # ML / Search
+torch>=2.6 --index-url https://download.pytorch.org/whl/cpu
 sentence-transformers
 
 # Utils
 python-dotenv==1.0.1
-
