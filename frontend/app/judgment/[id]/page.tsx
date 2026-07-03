@@ -79,7 +79,7 @@ export default function JudgmentDetailPage() {
   useEffect(() => {
     if (!id) return;
     setLoading(true);
-    fetch(`http://localhost:8000/api/judgment/${id}`)
+    fetch(`/api/judgment/${id}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -98,7 +98,7 @@ export default function JudgmentDetailPage() {
     if (!id || isDownloading) return;
     setIsDownloading(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/judgment/${id}/download`);
+      const res = await fetch(`/api/judgment/${id}/download`);
       if (!res.ok) throw new Error('Download failed');
       const data = await res.json();
       if (data.url) {
@@ -114,7 +114,7 @@ export default function JudgmentDetailPage() {
   // Fetch PDF URL for preview if available and tab is full_text
   useEffect(() => {
     if (activeTab === 'full_text' && judgment?.has_pdf && !pdfUrl) {
-      fetch(`http://localhost:8000/api/judgment/${id}/download`)
+      fetch(`/api/judgment/${id}/download`)
         .then((res) => {
           if (!res.ok) throw new Error('Failed to get PDF URL');
           return res.json();

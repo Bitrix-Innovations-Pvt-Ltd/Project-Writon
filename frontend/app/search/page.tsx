@@ -58,7 +58,7 @@ export default function SearchPage() {
   selectedActs.forEach((a) => queryParams.append('acts_cited', a));
 
   const { data, error, isLoading } = useSWR(
-    `http://localhost:8000/api/search/precedents?${queryParams.toString()}`,
+    `/api/search/precedents?${queryParams.toString()}`,
     fetcher
   );
 
