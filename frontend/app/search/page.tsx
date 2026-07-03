@@ -353,6 +353,7 @@ export default function SearchPage() {
 
             {!isLoading &&
               !error &&
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               data?.items?.map((item: any, i: number) => (
                 <Link
                   key={item.id}

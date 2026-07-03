@@ -63,7 +63,7 @@ export default function Home() {
                     <p className="text-xs font-mono font-bold text-[#0a523f]">AIR 1973 SC 1461</p>
                   </div>
                   <p className="text-sm text-on-surface-variant mb-6 leading-relaxed italic border-l-2 border-primary/20 pl-4">
-                    "The Basic Structure Doctrine prevents the Parliament from altering the fundamental features of the Constitution..."
+                    &quot;The Basic Structure Doctrine prevents the Parliament from altering the fundamental features of the Constitution...&quot;
                   </p>
                   <div className="flex items-center justify-between border-t border-outline-variant pt-4">
                     <span className="text-xs text-outline font-bold bg-surface-container px-2 py-1 rounded">Relevance: 99%</span>
@@ -120,7 +120,7 @@ export default function Home() {
                 </div>
                 <h3 className="font-display-lg text-3xl md:text-4xl font-bold text-on-background mb-6">Context-Aware AI Drafting</h3>
                 <p className="text-lg text-on-surface-variant mb-8 leading-relaxed">
-                  Simply input your case facts. Our specialized AI doesn't just fill templates; it structures arguments logically, identifying the exact legal principles applicable to your facts and formatting them according to standard court requirements.
+                  Simply input your case facts. Our specialized AI doesn&apos;t just fill templates; it structures arguments logically, identifying the exact legal principles applicable to your facts and formatting them according to standard court requirements.
                 </p>
                 <ul className="space-y-4 mb-8">
                   <li className="flex items-center gap-3">
@@ -288,7 +288,7 @@ export default function Home() {
           <div className="max-w-4xl mx-auto px-4 md:px-10 text-center relative z-10">
             <span className="material-symbols-outlined text-6xl text-primary/20 mb-8" style={{ fontVariationSettings: "'FILL' 1" }}>format_quote</span>
             <p className="font-display-lg text-3xl md:text-4xl text-on-background mb-12 italic leading-relaxed">
-              "Writon has fundamentally changed how my chambers operate. The sheer accuracy of the precedents it pulls and the structure of the initial drafts save us days of tedious research."
+              &quot;Writon has fundamentally changed how my chambers operate. The sheer accuracy of the precedents it pulls and the structure of the initial drafts save us days of tedious research.&quot;
             </p>
             <div className="flex items-center justify-center gap-6">
               <img alt="Ramesh K. Iyer" className="w-16 h-16 rounded-full border-2 border-outline-variant object-cover shadow-sm" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAdUMEczIvdeAbKbK5JY2uauYphvlIxdq1H40ayE_ezXkJLmwYfEhrxIopgYLiSZD5TMA4ZAVv68gc0ruzgK5iv5qNSEQM_0yZVMEvEI5poxRs8K9sW0PiTto5aTiUvT0UBh_ds8SZw72-0Dl2xAmCwz5jcbMnnzrJj0k77d8BwfT33StUl94n3ddrPJ4dLN-KUI6VwAg8LoQzG3PzwXjYgITp8ZBNsx6AqktDCunKFalFhHmH3qQzGYw"/>
