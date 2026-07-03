@@ -48,4 +48,7 @@ jobs:
         cache-to: type=gha,mode=max
         
     - name: Validate Docker Compose Config
-      run: docker-compose config
+      run: |
+       touch .env
+       docker compose config
+
