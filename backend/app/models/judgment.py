@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, BigInteger, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, TSVECTOR
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from app.core.database import Base
 
 class Judgment(Base):
@@ -22,9 +23,11 @@ class Judgment(Base):
     summary = Column(String)
     holding = Column(String)
     
-    # We couldn't create search_vector due to DB size limits
-    # search_vector = Column(TSVECTOR)
-    # embedding column removed — vectors are now stored in Pinecone
+    # For full text BM25 keyword search
+    search_vector = Column(TSVECTOR)
+    
+    # For Legal-BERT 768-dim dense semantic search
+    embedding = Column(Vector(768))
 
 class JudgmentChunk(Base):
     __tablename__ = "judgment_chunks"

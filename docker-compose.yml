@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: writon_backend
+    restart: always
+    env_file:
+      - .env
+    expose:
+      - "8000"
+    networks:
+      - writon_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: writon_frontend
+    restart: always
+    env_file:
+      - .env
+    expose:
+      - "3000"
+    networks:
+      - writon_network
+    depends_on:
+      - backend
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: writon_nginx
+    restart: always
+    ports:
+      - "80:80"
+    networks:
+      - writon_network
+    depends_on:
+      - frontend
+      - backend
+
+networks:
+  writon_network:
+    driver: bridge

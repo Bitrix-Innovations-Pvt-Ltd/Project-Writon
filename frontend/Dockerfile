@@ -1,29 +1,37 @@
-FROM node:18-alpine AS base
+# Step 1: Base image
+FROM node:20-slim AS base
 
-# Install dependencies only when needed
+# Step 2: Dependencies
 FROM base AS deps
 WORKDIR /app
-COPY package.json package-lock.json ./
+
+COPY package.json package-lock.json* ./
 RUN npm ci
 
-# Rebuild the source code only when needed
+# Step 3: Builder
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# Environment variables must be present at build time
+# If you have specific build envs, they would be passed via ARG/ENV
+ENV NEXT_TELEMETRY_DISABLED 1
+
 RUN npm run build
 
-# Production image, copy all the files and run next
+# Step 4: Runner
 FROM base AS runner
 WORKDIR /app
+
 ENV NODE_ENV production
-# Uncomment the following line in case you want to disable telemetry during runtime.
-# ENV NEXT_TELEMETRY_DISABLED 1
+ENV NEXT_TELEMETRY_DISABLED 1
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
+
 # Set the correct permission for prerender cache
 RUN mkdir .next
 RUN chown nextjs:nodejs .next
@@ -38,5 +46,6 @@ USER nextjs
 EXPOSE 3000
 
 ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
 
 CMD ["node", "server.js"]

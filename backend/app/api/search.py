@@ -1,43 +1,23 @@
 import os
+import asyncio
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, func, text
 from app.core.database import get_db
 from app.models.judgment import Judgment
 from typing import Optional, List
-from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
-from pinecone_text.sparse import BM25Encoder
 
 router = APIRouter(prefix="/search", tags=["search"])
 
-# Global Initialization (lazy load to not crash startup immediately if keys missing)
-pc = None
-index = None
+# Global Initialization
 model = None
-bm25 = None
 
 def init_ai():
-    global pc, index, model, bm25
-    if pc is None:
-        api_key = os.environ.get("PINECONE_API_KEY")
-        if api_key:
-            pc = Pinecone(api_key=api_key)
-            index = pc.Index("writon-judgments")
-            # Load models
-            print("Loading Legal-BERT for API...")
-            model = SentenceTransformer('nlpaueb/legal-bert-base-uncased')
-            print("Loading BM25 for API...")
-            bm25 = BM25Encoder()
-            
-            # Use absolute path to backend/bm25_model.json
-            bm25_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "bm25_model.json")
-            if os.path.exists(bm25_path):
-                bm25.load(bm25_path)
-                print("BM25 loaded successfully from file.")
-            else:
-                print("Warning: bm25_model.json not found! Falling back to slow default.")
-                bm25 = BM25Encoder().default()
+    global model
+    if model is None:
+        print("Loading Legal-BERT for API...")
+        model = SentenceTransformer('nlpaueb/legal-bert-base-uncased')
 
 @router.get("/precedents")
 async def search_precedents(
@@ -50,73 +30,109 @@ async def search_precedents(
     limit: int = Query(12, ge=1, le=50),
     db: AsyncSession = Depends(get_db)
 ):
+    # Initialize the model on first request
     init_ai()
     
-    # 1. Base DB Query
-    base_query = select(Judgment)
-    
-    # 2. Apply DB Filters (used for fallback or when q is empty, and to fetch final results)
+    # Base Filters (SQLAlchemy)
+    filters = []
     if category:
-        base_query = base_query.where(Judgment.case_type.in_(category))
+        filters.append(Judgment.case_type.in_(category))
     if case_type:
-        base_query = base_query.where(Judgment.case_type.in_(case_type))
+        filters.append(Judgment.case_type.in_(case_type))
     if year:
-        base_query = base_query.where(Judgment.year.in_(year))
+        filters.append(Judgment.year.in_(year))
         
     judgments = []
     total_items = 0
     
-    # 3. Execution Path
-    if q and index and model and bm25:
-        # AI HYBRID SEARCH PATH
+    if q and model:
+        # 1. Semantic Search (Dense Vector)
+        query_vector = model.encode(q).tolist()
         
-        # Build Pinecone Metadata Filter
-        pc_filter = {}
-        if category:
-            pc_filter["category"] = {"$in": category}
-        if case_type:
-            pc_filter["case_type"] = {"$in": case_type}
+        # Build raw SQL for vector search (using pgvector)
+        # We parameterize properly for safety
+        vector_sql = """
+            SELECT id, 
+                   ROW_NUMBER() OVER(ORDER BY embedding <-> :q_vec) as rank
+            FROM judgments
+            WHERE embedding IS NOT NULL
+        """
+        # Append filters to vector SQL
+        filter_params = {"q_vec": str(query_vector)}
+        
+        if category or case_type:
+            types = (category or []) + (case_type or [])
+            vector_sql += " AND case_type = ANY(:types)"
+            filter_params["types"] = types
         if year:
-            pc_filter["year"] = {"$in": year}
+            vector_sql += " AND year = ANY(:years)"
+            filter_params["years"] = year
             
-        # Encode Query
-        dense = model.encode(q).tolist()
-        sparse = bm25.encode_queries(q)
+        vector_sql += " ORDER BY rank LIMIT 50"
         
-        # Query Pinecone
-        try:
-            pc_res = index.query(
-                vector=dense,
-                sparse_vector=sparse,
-                top_k=50,
-                include_metadata=False,
-                filter=pc_filter if pc_filter else None
-            )
+        # 2. Keyword Search (BM25 TSVECTOR)
+        keyword_sql = """
+            SELECT id, 
+                   ROW_NUMBER() OVER(ORDER BY ts_rank(search_vector, websearch_to_tsquery('english', :q)) DESC) as rank
+            FROM judgments
+            WHERE search_vector @@ websearch_to_tsquery('english', :q)
+        """
+        keyword_params = {"q": q}
+        if category or case_type:
+            keyword_sql += " AND case_type = ANY(:types)"
+            keyword_params["types"] = types
+        if year:
+            keyword_sql += " AND year = ANY(:years)"
+            keyword_params["years"] = year
             
-            match_ids = [int(m.id) for m in pc_res.matches]
-            total_items = len(match_ids)
+        keyword_sql += " ORDER BY rank LIMIT 50"
+        
+        # Execute both queries concurrently
+        vec_res, kw_res = await asyncio.gather(
+            db.execute(text(vector_sql), filter_params),
+            db.execute(text(keyword_sql), keyword_params)
+        )
+        
+        semantic_ranks = {row.id: row.rank for row in vec_res.fetchall()}
+        keyword_ranks = {row.id: row.rank for row in kw_res.fetchall()}
+        
+        # 3. Reciprocal Rank Fusion (RRF)
+        # We give a 2.0x multiplier to Keyword Search because exact terms like 'Section 302 IPC' 
+        # must always outrank purely conceptual matches that don't contain the exact legal codes.
+        rrf_scores = {}
+        all_ids = set(semantic_ranks.keys()).union(set(keyword_ranks.keys()))
+        
+        for j_id in all_ids:
+            score = 0
+            if j_id in semantic_ranks:
+                score += 1.0 / (60 + semantic_ranks[j_id])
+            if j_id in keyword_ranks:
+                score += 2.0 / (60 + keyword_ranks[j_id])  # Boost exact keyword matches
+            rrf_scores[j_id] = score
             
-            if match_ids:
-                # Paginate the match IDs manually
-                start_idx = (page - 1) * limit
-                paginated_ids = match_ids[start_idx : start_idx + limit]
-                
-                # Fetch from Neon matching these IDs
-                if paginated_ids:
-                    # We need to preserve the order from Pinecone!
-                    db_res = await db.execute(base_query.where(Judgment.id.in_(paginated_ids)))
-                    db_judgments = db_res.scalars().all()
-                    
-                    # Sort them exactly as Pinecone ranked them
-                    id_to_judgment = {j.id: j for j in db_judgments}
-                    judgments = [id_to_judgment[id] for id in paginated_ids if id in id_to_judgment]
-        except Exception as e:
-            print("Pinecone error:", e)
-            # Fallback if pinecone fails
-            q = None 
-    
-    if not q:
-        # FALLBACK KEYWORD / DB FILTER PATH (if q is empty or AI fails)
+        # Sort by RRF score descending
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        total_items = len(sorted_ids)
+        
+        # Pagination
+        start_idx = (page - 1) * limit
+        paginated_ids = sorted_ids[start_idx : start_idx + limit]
+        
+        if paginated_ids:
+            # Fetch full judgment data
+            db_res = await db.execute(select(Judgment).where(Judgment.id.in_(paginated_ids)))
+            db_judgments = db_res.scalars().all()
+            
+            # Sort them exactly as our RRF scored them
+            id_to_judgment = {j.id: j for j in db_judgments}
+            judgments = [id_to_judgment[j_id] for j_id in paginated_ids if j_id in id_to_judgment]
+            
+    else:
+        # Fallback keyword DB Filter path if no query provided
+        base_query = select(Judgment)
+        for f in filters:
+            base_query = base_query.where(f)
+            
         count_query = select(func.count()).select_from(base_query.subquery())
         total_items = (await db.execute(count_query)).scalar() or 0
         
@@ -125,12 +141,13 @@ async def search_precedents(
         judgments = (await db.execute(paginated_query)).scalars().all()
 
     # 4. Compute Live Counts (Facets)
-    # We will query the DB to get the distribution of case_types and years for the CURRENT filtered base query
-    # To keep it fast, we group by case_type.
     facet_case_type = {}
     facet_year = {}
     
-    # We can do two quick GROUP BY queries on the DB
+    base_query = select(Judgment)
+    for f in filters:
+        base_query = base_query.where(f)
+        
     ct_query = select(Judgment.case_type, func.count()).select_from(base_query.subquery()).group_by(Judgment.case_type)
     for row in (await db.execute(ct_query)).all():
         if row[0]:
