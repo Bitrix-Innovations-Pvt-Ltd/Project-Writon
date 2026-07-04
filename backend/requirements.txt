@@ -2,6 +2,10 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 
+# PyTorch CPU-only (CUDA variant is ~6GB; CVE-2025-32434 requires >=2.6)
+# Installed via --index-url https://download.pytorch.org/whl/cpu in Dockerfile
+torch==2.6.0
+
 # Database  (asyncpg is the async driver; psycopg2-binary is NOT needed
 #            and was adding ~20MB of dead weight)
 sqlalchemy[asyncio]==2.0.36
@@ -13,8 +17,6 @@ alembic==1.14.0
 boto3==1.35.76
 
 # ML / Search
-# sentence-transformers pulls torch as a dep; torch itself is installed
-# separately in the Dockerfile from the CPU-only wheel index.
 sentence-transformers==3.3.1
 
 # Utils

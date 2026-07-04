@@ -17,14 +17,11 @@ WORKDIR /install
 # Re-running pip install only happens when requirements.txt changes.
 COPY requirements.txt .
 
-# 1. CPU-only PyTorch installed into a prefix dir so we can COPY it out.
-#    --index-url prevents the resolver from pulling the large CUDA variant.
+# Install all deps (including torch 2.6 CPU-only) in a single resolver pass.
+# --extra-index-url makes the CPU wheel index available alongside PyPI so that
+# torch==2.6.0 resolves to the ~1GB CPU build instead of the ~6GB CUDA build.
 RUN pip install --no-cache-dir --prefix=/install/deps \
-        torch \
-        --index-url https://download.pytorch.org/whl/cpu
-
-# 2. Rest of the application deps into the same prefix dir.
-RUN pip install --no-cache-dir --prefix=/install/deps \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
         -r requirements.txt
 
 # 3. Pre-download the Legal-BERT model weights into the image so the
