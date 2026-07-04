@@ -1,6 +1,51 @@
-__pycache__
+# Python
+__pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Secrets / local config
+.env
+.env.*
+*.env
+
+# Dev / test artefacts
 .pytest_cache/
+tests/
+htmlcov/
+.coverage
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Scripts (run separately; not needed in the running container)
+scripts/
+
+# Alembic (migrations are run as a separate init job, not inside the server)
+alembic/
+alembic.ini
+
+# Local model cache (the Dockerfile builder stage downloads it fresh)
+model_cache/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db

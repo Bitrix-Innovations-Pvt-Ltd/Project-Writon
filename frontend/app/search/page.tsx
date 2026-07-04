@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Navbar from '@/components/shared/Navbar';
 import useSWR from 'swr';
 import Link from 'next/link';
+import { useDebounce } from '@/hooks/useDebounce';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -22,7 +23,17 @@ const COMMON_ACTS = [
 export default function SearchPage() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  // Production-grade debounce:
+  // - 400ms delay before firing a search request
+  // - minLength=2 prevents single-char queries from triggering
+  //   a full semantic embedding + pgvector search
+  // - isPending lets us show a subtle typing indicator immediately
+  const { debouncedValue: debouncedSearch, isPending: isTyping } = useDebounce(
+    searchTerm,
+    400,
+    2,
+  );
 
   // Phase 1 Filters
   const [selectedCaseTypes, setSelectedCaseTypes] = useState<string[]>([]);
@@ -33,19 +44,10 @@ export default function SearchPage() {
   const [page, setPage] = useState(1);
   const limit = 12;
 
-  // Debounce search term
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(searchTerm);
-      setPage(1);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [searchTerm]);
-
-  // Reset page on filter change
+  // Reset to page 1 whenever the debounced query or filters change
   useEffect(() => {
     setPage(1);
-  }, [selectedCaseTypes, selectedYears, selectedActs]);
+  }, [debouncedSearch, selectedCaseTypes, selectedYears, selectedActs]);
 
   // Construct API URL
   const queryParams = new URLSearchParams({
@@ -59,7 +61,25 @@ export default function SearchPage() {
 
   const { data, error, isLoading } = useSWR(
     `/api/search/precedents?${queryParams.toString()}`,
-    fetcher
+    fetcher,
+    {
+      // Keep the previous page's data visible while the new fetch is in-flight.
+      // This eliminates the flash-of-empty that made the UI feel broken on
+      // every keystroke.
+      keepPreviousData: true,
+
+      // Disable revalidation on window focus — re-running a heavyweight
+      // semantic + vector search just because the user switched tabs is wasteful.
+      revalidateOnFocus: false,
+
+      // SWR deduplicates requests within this window (ms).  400ms matches
+      // our debounce delay so back-to-back renders with the same key don't
+      // double-fire.
+      dedupingInterval: 400,
+
+      // Don't endlessly retry on backend errors (500s); surface them cleanly.
+      shouldRetryOnError: false,
+    }
   );
 
   // Keyboard shortcut
@@ -135,7 +155,12 @@ export default function SearchPage() {
           <section className="space-y-6 mb-10 w-full">
             <div className="relative w-full group">
               <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none transition-colors duration-300 group-focus-within:text-primary">
-                <span className="material-symbols-outlined text-outline group-focus-within:text-primary">search</span>
+                {/* Swap icon for a subtle spinner while the user is still typing */}
+                {isTyping ? (
+                  <span className="material-symbols-outlined text-primary animate-spin">autorenew</span>
+                ) : (
+                  <span className="material-symbols-outlined text-outline group-focus-within:text-primary">search</span>
+                )}
               </div>
               <input
                 ref={searchInputRef}
@@ -145,6 +170,9 @@ export default function SearchPage() {
                 placeholder="Search precedents by concept, citation, or party name..."
                 type="text"
                 id="search-input"
+                aria-label="Search precedents"
+                autoComplete="off"
+                spellCheck={false}
               />
               <div className="absolute inset-y-0 right-4 flex items-center gap-2">
                 {searchTerm && (
@@ -152,6 +180,7 @@ export default function SearchPage() {
                     onClick={() => setSearchTerm('')}
                     className="text-outline hover:text-on-background transition-colors"
                     title="Clear search"
+                    aria-label="Clear search"
                   >
                     <span className="material-symbols-outlined text-[20px]">close</span>
                   </button>
