@@ -4,6 +4,25 @@ import { useState, useEffect, useRef } from 'react';
 import Navbar from '@/components/shared/Navbar';
 import Link from 'next/link';
 
+import { districtCourtsData, tribunalsData, specialCourtsData } from './courtsData';
+
+const indianStates = Object.keys(districtCourtsData).sort();
+
+const highCourts = [
+  "Allahabad High Court", "Andhra Pradesh High Court", "Bombay High Court", "Calcutta High Court", 
+  "Chhattisgarh High Court", "Delhi High Court", "Gauhati High Court", "Gujarat High Court", 
+  "Himachal Pradesh High Court", "Jammu & Kashmir and Ladakh High Court", "Jharkhand High Court", 
+  "Karnataka High Court", "Kerala High Court", "Madhya Pradesh High Court", "Madras High Court", 
+  "Manipur High Court", "Meghalaya High Court", "Orissa High Court", "Patna High Court", 
+  "Punjab and Haryana High Court", "Rajasthan High Court", "Sikkim High Court", 
+  "Telangana High Court", "Tripura High Court", "Uttarakhand High Court"
+];
+
+const getDistrictCourtsForState = (state: string) => {
+  if (!state) return [];
+  return districtCourtsData[state] || [];
+};
+
 export default function DraftWizard() {
   const [currentStep, setCurrentStep] = useState(1);
   const [courtLevel, setCourtLevel] = useState('supreme');
@@ -11,6 +30,13 @@ export default function DraftWizard() {
   const [subjectMatter, setSubjectMatter] = useState('');
   const [caseDescription, setCaseDescription] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({}); 
+
+  const [selectedHighCourt, setSelectedHighCourt] = useState('');
+  const [selectedState, setSelectedState] = useState('');
+  const [selectedDistrictCourt, setSelectedDistrictCourt] = useState('');
+  const [selectedSubLevel, setSelectedSubLevel] = useState<'tribunal' | 'special_court' | ''>('');
+  const [selectedTribunal, setSelectedTribunal] = useState('');
+  const [selectedSpecialCourt, setSelectedSpecialCourt] = useState('');
 
   // Generation state
   const [generateStatus, setGenerateStatus] = useState<'idle' | 'loading' | 'streaming' | 'completed'>('idle');
@@ -209,6 +235,154 @@ b) Pass any other order which this Hon'ble Court may deem fit and proper in the 
                   </label>
                 ))}
               </div>
+
+              {courtLevel === 'high' && (
+                <div className="mt-6 p-6 border rounded-xl bg-surface-container-lowest animate-fade-slide-up">
+                  <h3 className="font-bold text-on-surface mb-2">Select High Court</h3>
+                  <select 
+                    value={selectedHighCourt}
+                    onChange={(e) => setSelectedHighCourt(e.target.value)}
+                    className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                  >
+                    <option value="" disabled>Choose a High Court...</option>
+                    {highCourts.map((court) => (
+                      <option key={court} value={court}>{court}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {courtLevel === 'district' && (
+                <div className="mt-6 p-6 border rounded-xl bg-surface-container-lowest animate-fade-slide-up space-y-4">
+                  <div>
+                    <h3 className="font-bold text-on-surface mb-2">Select State</h3>
+                    <select 
+                      value={selectedState}
+                      onChange={(e) => {
+                        setSelectedState(e.target.value);
+                        setSelectedDistrictCourt('');
+                      }}
+                      className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                    >
+                      <option value="" disabled>Choose a State...</option>
+                      {indianStates.map((state) => (
+                        <option key={state} value={state}>{state}</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {selectedState && (
+                    <div className="animate-fade-slide-up">
+                      <h3 className="font-bold text-on-surface mb-2">Select District Court</h3>
+                      <select 
+                        value={selectedDistrictCourt}
+                        onChange={(e) => setSelectedDistrictCourt(e.target.value)}
+                        className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                      >
+                        <option value="" disabled>Choose a District Court...</option>
+                        {getDistrictCourtsForState(selectedState).map((court) => (
+                          <option key={court} value={court}>{court}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {courtLevel === 'tribunal' && (
+                <div className="mt-6 p-6 border rounded-xl bg-surface-container-lowest animate-fade-slide-up space-y-6">
+                  <div>
+                    <h3 className="font-bold text-on-surface mb-3">Choose Category</h3>
+                    <div className="flex gap-4">
+                      {[
+                        { id: 'tribunal', label: 'Major Tribunal' },
+                        { id: 'special_court', label: 'Special Court' }
+                      ].map((sub) => (
+                        <label key={sub.id} className={`flex-1 flex items-center justify-between p-4 border rounded-lg cursor-pointer transition-all duration-200 ${selectedSubLevel === sub.id ? 'border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(14,107,82,0.1)]' : 'border-outline-variant bg-white hover:border-primary/50'}`} onClick={() => {
+                          setSelectedSubLevel(sub.id as 'tribunal' | 'special_court');
+                          setSelectedTribunal('');
+                          setSelectedSpecialCourt('');
+                        }}>
+                          <div className="flex items-center gap-3">
+                            <input type="radio" name="sub_level" value={sub.id} checked={selectedSubLevel === sub.id} onChange={() => {}} className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" />
+                            <span className={`text-sm font-semibold ${selectedSubLevel === sub.id ? 'text-primary' : 'text-on-surface'}`}>{sub.label}</span>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectedSubLevel === 'tribunal' && (
+                    <div className="space-y-4 animate-fade-slide-up">
+                      <div>
+                        <h3 className="font-bold text-on-surface mb-2">Select Tribunal</h3>
+                        <select 
+                          value={selectedTribunal}
+                          onChange={(e) => setSelectedTribunal(e.target.value)}
+                          className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                        >
+                          <option value="" disabled>Choose a Tribunal...</option>
+                          {tribunalsData.map((t) => (
+                            <option key={t.name} value={t.name}>{t.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {selectedTribunal && (() => {
+                        const trib = tribunalsData.find(t => t.name === selectedTribunal);
+                        if (!trib) return null;
+                        return (
+                          <div className="p-4 bg-white rounded-lg border border-outline-variant text-xs space-y-2 animate-fade-slide-up">
+                            <div>
+                              <span className="font-bold text-on-surface block mb-0.5">Handles:</span>
+                              <p className="text-on-surface-variant leading-relaxed">{trib.handles}</p>
+                            </div>
+                            <div>
+                              <span className="font-bold text-on-surface block mb-0.5">Bench Locations:</span>
+                              <p className="text-on-surface-variant leading-relaxed">{trib.benchLocations}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  {selectedSubLevel === 'special_court' && (
+                    <div className="space-y-4 animate-fade-slide-up">
+                      <div>
+                        <h3 className="font-bold text-on-surface mb-2">Select Special Court</h3>
+                        <select 
+                          value={selectedSpecialCourt}
+                          onChange={(e) => setSelectedSpecialCourt(e.target.value)}
+                          className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                        >
+                          <option value="" disabled>Choose a Special Court...</option>
+                          {specialCourtsData.map((sc) => (
+                            <option key={sc.name} value={sc.name}>{sc.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {selectedSpecialCourt && (() => {
+                        const sc = specialCourtsData.find(s => s.name === selectedSpecialCourt);
+                        if (!sc) return null;
+                        return (
+                          <div className="p-4 bg-white rounded-lg border border-outline-variant text-xs space-y-2 animate-fade-slide-up">
+                            <div>
+                              <span className="font-bold text-on-surface block mb-0.5">Purpose:</span>
+                              <p className="text-on-surface-variant leading-relaxed">{sc.purpose}</p>
+                            </div>
+                            <div>
+                              <span className="font-bold text-on-surface block mb-0.5">Governing Law:</span>
+                              <p className="text-on-surface-variant leading-relaxed font-mono">{sc.governingLaw}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
 
@@ -216,7 +390,7 @@ b) Pass any other order which this Hon'ble Court may deem fit and proper in the 
             <>
               <div className="mb-8">
                 <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Document Type</h2>
-                <p className="text-primary text-sm font-semibold uppercase tracking-wider">{courtLevel === 'supreme' ? 'Supreme Court of India' : courtLevel === 'high' ? 'High Court' : courtLevel === 'district' ? 'District Court' : 'Tribunal'}</p>
+                <p className="text-primary text-sm font-semibold uppercase tracking-wider">{courtLevel === 'supreme' ? 'Supreme Court of India' : courtLevel === 'high' ? 'High Court' : courtLevel === 'district' ? 'District Court' : selectedSubLevel === 'special_court' ? 'Special Court' : 'Tribunal'}</p>
               </div>
               <div className="space-y-3">
                 {documentTypes.map((type) => (
@@ -392,7 +566,13 @@ b) Pass any other order which this Hon'ble Court may deem fit and proper in the 
                 <h4 className="font-bold text-sm tracking-wider uppercase mb-4 text-on-surface">Draft Summary</h4>
                 <div className="grid grid-cols-[150px_1fr] gap-y-2 text-sm">
                   <span className="text-on-surface-variant">Court:</span>
-                  <span className="font-medium text-on-surface capitalize">{courtLevel} Court</span>
+                  <span className="font-medium text-on-surface capitalize">
+                    {courtLevel === 'high' && selectedHighCourt ? selectedHighCourt : 
+                     courtLevel === 'district' && selectedDistrictCourt ? `${selectedDistrictCourt}, ${selectedState}` : 
+                     courtLevel === 'tribunal' && selectedSubLevel === 'tribunal' && selectedTribunal ? selectedTribunal :
+                     courtLevel === 'tribunal' && selectedSubLevel === 'special_court' && selectedSpecialCourt ? selectedSpecialCourt :
+                     `${courtLevel} Court`}
+                  </span>
                   <span className="text-on-surface-variant">Document:</span>
                   <span className="font-medium text-on-surface">{documentType || 'Not selected'}</span>
                   <span className="text-on-surface-variant">Subject:</span>
@@ -495,7 +675,16 @@ b) Pass any other order which this Hon'ble Court may deem fit and proper in the 
             {currentStep < 6 ? (
               <button 
                 onClick={handleNext}
-                className="flex items-center gap-2 bg-primary text-white px-8 py-3 rounded-lg font-bold shadow-md hover:-translate-y-0.5 hover:shadow-lg hover:bg-[#004131] active:scale-95 transition-all duration-300">
+                disabled={
+                  (currentStep === 1 && courtLevel === 'high' && !selectedHighCourt) ||
+                  (currentStep === 1 && courtLevel === 'district' && (!selectedState || !selectedDistrictCourt)) ||
+                  (currentStep === 1 && courtLevel === 'tribunal' && (
+                    !selectedSubLevel ||
+                    (selectedSubLevel === 'tribunal' && !selectedTribunal) ||
+                    (selectedSubLevel === 'special_court' && !selectedSpecialCourt)
+                  ))
+                }
+                className="flex items-center gap-2 bg-primary text-white px-8 py-3 rounded-lg font-bold shadow-md hover:-translate-y-0.5 hover:shadow-lg hover:bg-[#004131] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 transition-all duration-300">
                 Next
                 <span className="material-symbols-outlined text-sm">arrow_forward</span>
               </button>
