@@ -21,3 +21,11 @@ sentence-transformers==3.3.1
 
 # Utils
 python-dotenv==1.0.1
+
+# OCR & File Processing
+pytesseract
+Pillow
+PyMuPDF
+
+# LLM Integrations
+openai

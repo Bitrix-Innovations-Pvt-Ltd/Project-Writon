@@ -42,6 +42,7 @@ FROM python:3.10-slim AS runtime
 # Minimal runtime system dep: libpq5 for asyncpg's C extension
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
+        tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled site-packages from builder (not pip, not build tools)

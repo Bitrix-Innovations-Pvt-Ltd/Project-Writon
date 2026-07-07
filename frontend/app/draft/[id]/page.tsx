@@ -135,7 +135,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     formData.append("user_id", userId || "");
     
     try {
-      const res = await fetch("http://localhost:8000/api/v1/uploads", {
+      const res = await fetch(`/api/v1/uploads`, {
         method: "POST",
         body: formData,
       });
@@ -381,7 +381,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     };
 
     try {
-      const response = await fetch('http://localhost:8000/api/v1/drafts/generate', {
+      const response = await fetch('/api/v1/drafts/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
