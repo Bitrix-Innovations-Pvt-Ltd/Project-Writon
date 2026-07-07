@@ -1,6 +1,7 @@
 # Web framework
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+python-multipart
 
 # PyTorch CPU-only (CUDA variant is ~6GB; CVE-2025-32434 requires >=2.6)
 # Installed via --index-url https://download.pytorch.org/whl/cpu in Dockerfile
