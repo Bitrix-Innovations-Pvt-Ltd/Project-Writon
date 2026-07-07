@@ -80,6 +80,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [courtLevel, setCourtLevel] = useState('supreme');
   const [documentType, setDocumentType] = useState('');
   const [subjectMatter, setSubjectMatter] = useState('');
+  const [selectedMainMatter, setSelectedMainMatter] = useState('');
   const [caseDescription, setCaseDescription] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({}); 
   const [uploadError, setUploadError] = useState<string | null>(null); 
@@ -775,7 +776,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
           {currentStep === 2 && (
             <>
               <div className="mb-8">
-                <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Document Type</h2>
+                <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Case Type</h2>
                 <p className="text-primary text-sm font-semibold uppercase tracking-wider">{courtLevel === 'supreme' ? 'Supreme Court of India' : courtLevel === 'high' ? 'High Court' : courtLevel === 'district' ? 'District Court' : selectedSubLevel === 'special_court' ? 'Special Court' : 'Tribunal'}</p>
               </div>
               <div className="space-y-3">
@@ -812,75 +813,125 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               <div className="mb-8">
                 <h3 className="font-bold text-on-surface mb-1">Nature of Dispute</h3>
                 <p className="text-sm text-on-surface-variant mb-4">Select the category that best describes your case — this determines which documents you need</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {isLoadingSubjectMatters ? (
-                    Array(6).fill(0).map((_, i) => (
+                
+                {isLoadingSubjectMatters ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {Array(6).fill(0).map((_, i) => (
                       <div key={i} className="animate-pulse flex p-3 border border-outline-variant rounded-lg bg-surface-container-low h-[46px]"></div>
-                    ))
-                  ) : subjectMattersList.length === 0 ? (
-                    <div className="col-span-1 md:col-span-2 text-sm text-on-surface-variant p-4 bg-surface-container-low rounded-lg border border-outline-variant">
-                      No subject matters available for this court combination.
-                    </div>
-                  ) : (
-                    (() => {
-                      const filteredMatters = subjectMattersList.filter((matter) => {
-                        // Always allow "Other" to be selectable
-                        if (matter.matter_name === 'Other') return true;
-                        
-                        // If no document type is selected, show all
-                        if (!documentType) return true;
-                        
-                        // If a document type is selected, only show subject matters that support it
-                        if (matter.applicable_doc_types && matter.applicable_doc_types.length > 0) {
-                          return matter.applicable_doc_types.includes(documentType);
-                        }
-                        return true; 
-                      });
-                      
-                      // If "Other" isn't in the list (or list is empty), inject it as a fallback
-                      if (!filteredMatters.some(m => m.matter_name === 'Other')) {
-                        filteredMatters.push({ matter_name: 'Other', applicable_doc_types: [] });
+                    ))}
+                  </div>
+                ) : subjectMattersList.length === 0 ? (
+                  <div className="text-sm text-on-surface-variant p-4 bg-surface-container-low rounded-lg border border-outline-variant">
+                    No subject matters available for this court combination.
+                  </div>
+                ) : (
+                  (() => {
+                    const filteredMatters = subjectMattersList.filter((matter) => {
+                      if (matter.matter_name === 'Other') return true;
+                      if (!documentType) return true;
+                      if (matter.applicable_doc_types && matter.applicable_doc_types.length > 0) {
+                        return matter.applicable_doc_types.includes(documentType);
                       }
+                      return true; 
+                    });
+                    
+                    if (!filteredMatters.some(m => m.matter_name === 'Other')) {
+                      filteredMatters.push({ matter_name: 'Other', applicable_doc_types: [] });
+                    }
 
-                      return filteredMatters.map((matter) => {
-                      
-                        return (
-                        <label key={matter.matter_name} className={`block p-3 border rounded-lg cursor-pointer transition-all duration-200 
-                          ${subjectMatter === matter.matter_name ? 'border-primary bg-primary/5' : 'border-outline-variant bg-white hover:border-primary/50'}
-                        `}>
-                          <div className="flex items-center gap-3">
-                            <input 
-                              type="radio" 
-                              name="subject_matter" 
-                              value={matter.matter_name} 
-                              checked={subjectMatter === matter.matter_name} 
-                              onChange={() => setSubjectMatter(matter.matter_name)} 
-                              className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" 
-                            />
-                            <div className="flex flex-col">
-                              <span className={`text-sm font-medium ${subjectMatter === matter.matter_name ? 'text-primary' : 'text-on-surface'}`}>{matter.matter_name}</span>
+                    // Group by main matter (split by " — ")
+                    const groupedMatters = filteredMatters.reduce((acc, matter) => {
+                      const parts = matter.matter_name.split(' — ');
+                      const main = parts[0];
+                      const sub = parts[1] || null;
+                      if (!acc[main]) acc[main] = [];
+                      if (sub) {
+                        acc[main].push({ full: matter.matter_name, sub });
+                      } else {
+                        acc[main].push({ full: matter.matter_name, sub: null });
+                      }
+                      return acc;
+                    }, {} as Record<string, {full: string, sub: string | null}[]>);
+
+                    const mainMatterNames = Object.keys(groupedMatters);
+                    const selectedGroup = selectedMainMatter ? groupedMatters[selectedMainMatter] : null;
+                    const hasSubCategories = selectedGroup && selectedGroup.some(item => item.sub !== null);
+
+                    return (
+                      <div className="space-y-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {mainMatterNames.map((mainName) => {
+                            const isSelected = selectedMainMatter === mainName || (subjectMatter && subjectMatter.startsWith(mainName));
+                            return (
+                              <label key={mainName} className={`block p-3 border rounded-lg cursor-pointer transition-all duration-200 
+                                ${isSelected ? 'border-primary bg-primary/5' : 'border-outline-variant bg-white hover:border-primary/50'}
+                              `}>
+                                <div className="flex items-center gap-3">
+                                  <input 
+                                    type="radio" 
+                                    name="main_matter" 
+                                    value={mainName} 
+                                    checked={isSelected} 
+                                    onChange={() => {
+                                      setSelectedMainMatter(mainName);
+                                      const group = groupedMatters[mainName];
+                                      if (group && !group.some(i => i.sub !== null)) {
+                                        setSubjectMatter(group[0].full);
+                                      } else {
+                                        setSubjectMatter(''); // Need to pick a subcategory
+                                      }
+                                    }} 
+                                    className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" 
+                                  />
+                                  <span className={`text-sm font-medium ${isSelected ? 'text-primary' : 'text-on-surface'}`}>{mainName}</span>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        
+                        {hasSubCategories && (
+                          <div className="mt-6 pt-6 border-t border-outline-variant animate-in fade-in slide-in-from-top-2">
+                            <h3 className="font-bold text-on-surface mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-primary text-sm">subdirectory_arrow_right</span>
+                              Select Specific Issue
+                            </h3>
+                            <div className="grid grid-cols-1 gap-2 pl-4">
+                              {selectedGroup.map((item) => (
+                                <label key={item.full} className={`block p-3 border rounded-lg cursor-pointer transition-all duration-200 
+                                  ${subjectMatter === item.full ? 'border-primary bg-primary/5 shadow-[0_0_0_1px_rgba(14,107,82,0.1)]' : 'border-outline-variant bg-surface-container-lowest hover:border-primary/50'}
+                                `}>
+                                  <div className="flex items-center gap-3">
+                                    <input 
+                                      type="radio" 
+                                      name="sub_matter" 
+                                      value={item.full} 
+                                      checked={subjectMatter === item.full} 
+                                      onChange={() => setSubjectMatter(item.full)} 
+                                      className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" 
+                                    />
+                                    <span className={`text-sm ${subjectMatter === item.full ? 'font-bold text-primary' : 'font-medium text-on-surface'}`}>{item.sub}</span>
+                                  </div>
+                                </label>
+                              ))}
                             </div>
                           </div>
-                        </label>
-                      );
-                    });
+                        )}
+                      </div>
+                    );
                   })()
-                  )}
-                </div>
+                )}
               </div>
 
               <div>
                 <h3 className="font-bold text-on-surface mb-1">Brief Description of the Case</h3>
-                <p className="text-sm text-on-surface-variant mb-4">Describe what happened and what relief you are seeking (minimum 180 words)</p>
+                <p className="text-sm text-on-surface-variant mb-4">Describe what happened and what relief you are seeking</p>
                 <textarea 
                   value={caseDescription}
                   onChange={(e) => setCaseDescription(e.target.value)}
                   placeholder="e.g. The petitioner is the recorded owner of Plot No. 45, Village Rampur. The respondent has illegally occupied the land since January 2023..." 
                   className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all resize-y min-h-[200px]" 
                 />
-                <div className={`text-xs mt-2 font-medium ${caseDescription.trim().split(/\s+/).filter(w => w.length > 0).length < 180 ? 'text-error' : 'text-primary'}`}>
-                  {caseDescription.trim().split(/\s+/).filter(w => w.length > 0).length} words {caseDescription.trim().split(/\s+/).filter(w => w.length > 0).length < 180 ? `(${180 - caseDescription.trim().split(/\s+/).filter(w => w.length > 0).length} more needed)` : '(Minimum reached)'}
-                </div>
               </div>
             </>
           )}
@@ -1110,7 +1161,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                      courtLevel === 'tribunal' && selectedSubLevel === 'special_court' && selectedSpecialCourt ? selectedSpecialCourt :
                      `${courtLevel} Court`}
                   </span>
-                  <span className="text-on-surface-variant">Document:</span>
+                  <span className="text-on-surface-variant">Case Type:</span>
                   <span className="font-medium text-on-surface">{documentType || 'Not selected'}</span>
                   <span className="text-on-surface-variant">Subject:</span>
                   <span className="font-medium text-on-surface">{subjectMatter || 'Not selected'}</span>
@@ -1290,7 +1341,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   )) ||
                   (currentStep === 3 && (
                     !subjectMatter ||
-                    caseDescription.trim().split(/\s+/).filter(w => w.length > 0).length < 180
+                    !caseDescription.trim()
                   ))
                 }
                 className="flex items-center gap-2 bg-primary text-white px-8 py-3 rounded-lg font-bold shadow-md hover:-translate-y-0.5 hover:shadow-lg hover:bg-[#004131] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 transition-all duration-300">
