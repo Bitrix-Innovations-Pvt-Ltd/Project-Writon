@@ -60,7 +60,7 @@ export default function SearchPage() {
   selectedActs.forEach((a) => queryParams.append('acts_cited', a));
 
   const { data, error, isLoading } = useSWR(
-    `/api/search/precedents?${queryParams.toString()}`,
+    `/api/v1/search/precedents?${queryParams.toString()}`,
     fetcher,
     {
       // Keep the previous page's data visible while the new fetch is in-flight.

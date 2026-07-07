@@ -36,7 +36,7 @@ class JudgmentChunk(Base):
     judgment_id = Column(BigInteger, ForeignKey("judgments.id", ondelete="CASCADE"))
     chunk_index = Column(Integer)
     chunk_text = Column(String)
-    # embedding column removed — vectors are now stored in Pinecone
+    embedding = Column(Vector(768))
     page_number = Column(Integer)
 
 class SearchLog(Base):

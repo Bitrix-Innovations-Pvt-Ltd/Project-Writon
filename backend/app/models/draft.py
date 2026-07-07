@@ -12,6 +12,16 @@ class Draft(Base):
     case_type = Column(String)
     court = Column(String)
     form_data = Column(JSON)
+    
+    # Parties and Facts (Step 5 extensions)
+    advocate_name = Column(String)
+    advocate_enrollment_no = Column(String)
+    petitioners = Column(JSON)
+    respondents = Column(JSON)
+    impugned_order_date = Column(DateTime)
+    jurisdiction_basis = Column(String)
+    interim_relief_sought = Column(String)
+    
     draft_html = Column(String)
     draft_text = Column(String)
     citation_ids = Column(ARRAY(BigInteger))

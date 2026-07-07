@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Integer, BigInteger, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from pgvector.sqlalchemy import Vector
 from app.core.database import Base
 
@@ -26,3 +27,5 @@ class LegalCodeSection(Base):
     section_text = Column(String, nullable=False)
     embedding = Column(Vector(1536))
     corresponds_to = Column(String)
+    # BM25 keyword search (title weighted A, section_text weighted B)
+    search_vector = Column(TSVECTOR)
