@@ -11,6 +11,7 @@ from app.api.v1 import (
     analytics as analytics_v1,
     uploads as uploads_v1,
     drafting as drafting_v1,
+    translate as translate_v1,
 )
 
 app = FastAPI(title="WritOnline API")
@@ -31,6 +32,7 @@ app.include_router(document_requirements_v1.router, prefix="/api/v1")
 app.include_router(analytics_v1.router, prefix="/api/v1")
 app.include_router(uploads_v1.router, prefix="/api/v1")
 app.include_router(drafting_v1.router, prefix="/api/v1")
+app.include_router(translate_v1.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
@@ -50,4 +52,3 @@ def health_check():
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
