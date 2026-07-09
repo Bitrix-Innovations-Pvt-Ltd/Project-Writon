@@ -27,6 +27,7 @@ python-dotenv==1.0.1
 pytesseract
 Pillow
 PyMuPDF
+python-docx
 
 # LLM Integrations
 openai

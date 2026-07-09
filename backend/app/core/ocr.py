@@ -111,6 +111,14 @@ def extract_text_from_bytes(file_bytes: bytes, filename: str) -> str:
                 except Exception as tesseract_e:
                     print(f"Tesseract OCR also failed: {str(tesseract_e)}")
                     extracted_text = ""
+        elif ext == 'docx':
+            import docx
+            try:
+                doc = docx.Document(io.BytesIO(file_bytes))
+                extracted_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+            except Exception as e:
+                print(f"Failed to extract text from DOCX: {str(e)}")
+                extracted_text = ""
         else:
             extracted_text = "Unsupported file type for OCR."
             
