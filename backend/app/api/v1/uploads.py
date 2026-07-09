@@ -36,9 +36,23 @@ async def upload_document(
     r2_path = f"drafting/Document/User/{user_id}/{safe_filename}"
     
     try:
-        # We need an io.BytesIO for boto3 upload
         import io
-        r2_key = upload_file_to_r2(io.BytesIO(file_bytes), r2_path, file.content_type or "application/octet-stream")
+        import asyncio
+        
+        # Start both heavy tasks concurrently in background threads
+        r2_task = asyncio.to_thread(
+            upload_file_to_r2, 
+            io.BytesIO(file_bytes), 
+            r2_path, 
+            file.content_type or "application/octet-stream"
+        )
+        ocr_task = asyncio.to_thread(
+            extract_text_from_bytes, 
+            file_bytes, 
+            file.filename
+        )
+        
+        r2_key, ocr_text = await asyncio.gather(r2_task, ocr_task)
         
         parsed_draft_id = None
         if draft_id and draft_id.isdigit() and int(draft_id) > 0:
@@ -65,8 +79,6 @@ async def upload_document(
         await db.commit()
         await db.refresh(uploaded_doc)
         
-        # Run OCR and Verification synchronously so frontend can alert if rejected
-        ocr_text = extract_text_from_bytes(file_bytes, file.filename)
         if ocr_text:
             ocr_text = ocr_text.replace('\x00', '')
             
@@ -86,6 +98,9 @@ async def upload_document(
             "doc_id": uploaded_doc.id,
             "r2_key": r2_key
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions so they retain their status code
+        raise
     except Exception as e:
         import traceback
         print(traceback.format_exc())
