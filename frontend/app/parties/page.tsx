@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import Navbar from "@/components/shared/Navbar";
 
 type Party = {
     serial_no: number;
@@ -14,18 +15,6 @@ type Party = {
     raw_text: string;
 };
 
-const emptyParty = (serial_no: number): Party => ({
-    serial_no,
-    full_name: "",
-    relation_type: "",
-    relation_name: "",
-    age: null,
-    address: "",
-    state: "",
-    country: "India",
-    raw_text: "",
-});
-
 function PartyListEditor({ label }: { label: string }) {
     const [parties, setParties] = useState<Party[]>([]);
     const [activeSlide, setActiveSlide] = useState(0);
@@ -38,8 +27,7 @@ function PartyListEditor({ label }: { label: string }) {
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
 
-    const renumber = (list: Party[]) =>
-        list.map((p, i) => ({ ...p, serial_no: i + 1 }));
+    const renumber = (list: Party[]) => list.map((p, i) => ({ ...p, serial_no: i + 1 }));
 
     const handleManualAdd = async () => {
         if (!manualText.trim()) return;
@@ -121,9 +109,7 @@ function PartyListEditor({ label }: { label: string }) {
     };
 
     const updateActiveParty = (field: keyof Party, value: string | number | null) => {
-        setParties((prev) =>
-            prev.map((p, i) => (i === activeSlide ? { ...p, [field]: value } : p))
-        );
+        setParties((prev) => prev.map((p, i) => (i === activeSlide ? { ...p, [field]: value } : p)));
     };
 
     const removeActiveParty = () => {
@@ -135,40 +121,44 @@ function PartyListEditor({ label }: { label: string }) {
     };
 
     const activeParty = parties[activeSlide];
+    const tabBtn = (isActive: boolean) =>
+        `py-2 px-4 text-sm font-semibold rounded-lg transition-all ${isActive ? "bg-primary text-white" : "text-on-surface-variant hover:bg-surface-container-low"
+        }`;
 
     return (
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, marginBottom: 24 }}>
-            <h3>{label}</h3>
+        <div
+            className="bg-white p-8 rounded-xl border border-outline-variant mb-10"
+            style={{ boxShadow: "0 4px 12px rgba(20, 27, 46, 0.04)" }}
+        >
+            <h2 className="font-document-title text-xl font-semibold mb-4">{label}</h2>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                <button onClick={() => setTab("type")} style={{ fontWeight: tab === "type" ? "bold" : "normal" }}>
-                    Type
-                </button>
-                <button onClick={() => setTab("upload")} style={{ fontWeight: tab === "upload" ? "bold" : "normal" }}>
-                    Upload Document
-                </button>
-                <button onClick={() => setTab("voice")} style={{ fontWeight: tab === "voice" ? "bold" : "normal" }}>
-                    Voice
-                </button>
+            <div className="flex gap-2 mb-4">
+                <button onClick={() => setTab("type")} className={tabBtn(tab === "type")}>Type</button>
+                <button onClick={() => setTab("upload")} className={tabBtn(tab === "upload")}>Upload Document</button>
+                <button onClick={() => setTab("voice")} className={tabBtn(tab === "voice")}>Voice</button>
             </div>
 
             {tab === "type" && (
-                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <div className="flex gap-3 mb-4">
                     <input
                         type="text"
                         placeholder="e.g. Ram Kumar S/O Shyam Kumar, Age 35, Lucknow, UP"
                         value={manualText}
                         onChange={(e) => setManualText(e.target.value)}
-                        style={{ flex: 1, padding: 6 }}
+                        className="flex-1 p-2 text-sm rounded-lg border border-outline-variant focus:outline-none focus:border-primary"
                     />
-                    <button onClick={handleManualAdd} disabled={loading}>
+                    <button
+                        onClick={handleManualAdd}
+                        disabled={loading}
+                        className="py-2 px-5 bg-primary text-white text-sm font-semibold rounded-lg hover:bg-[#0a523f] transition-all active:scale-95 disabled:opacity-40"
+                    >
                         {loading ? "Adding..." : "Add"}
                     </button>
                 </div>
             )}
 
             {tab === "upload" && (
-                <div style={{ marginBottom: 12 }}>
+                <div className="mb-4 flex items-center gap-3">
                     <input
                         type="file"
                         accept="image/*,application/pdf"
@@ -176,52 +166,76 @@ function PartyListEditor({ label }: { label: string }) {
                             const file = e.target.files?.[0];
                             if (file) handleFileUpload(file);
                         }}
+                        className="text-sm text-on-surface-variant"
                     />
-                    {loading && <span style={{ marginLeft: 8, color: "gray" }}>Processing...</span>}
+                    {loading && <span className="text-sm text-outline">Processing...</span>}
                 </div>
             )}
 
             {tab === "voice" && (
-                <div style={{ marginBottom: 12 }}>
-                    <button onClick={recording ? stopRecording : startRecording}>
+                <div className="mb-4 flex items-center gap-3">
+                    <button
+                        onClick={recording ? stopRecording : startRecording}
+                        className={`py-2 px-5 text-sm font-semibold rounded-lg transition-all active:scale-95 ${recording ? "bg-error text-white hover:bg-[#93000a]" : "bg-primary text-white hover:bg-[#0a523f]"
+                            }`}
+                    >
                         {recording ? "Stop Recording" : "Record"}
                     </button>
-                    {loading && <span style={{ marginLeft: 8, color: "gray" }}>Processing...</span>}
+                    {loading && <span className="text-sm text-outline">Processing...</span>}
                 </div>
             )}
 
-            {error && <div style={{ color: "red", marginBottom: 12 }}>{error}</div>}
+            {error && <div className="text-error text-sm mb-4">{error}</div>}
 
             {parties.length > 0 && activeParty && (
-                <div style={{ background: "#f5f5f5", padding: 12, borderRadius: 6 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                        <button onClick={() => setActiveSlide((s) => Math.max(0, s - 1))} disabled={activeSlide === 0}>
+                <div className="bg-surface-container-low rounded-lg p-5">
+                    <div className="flex items-center justify-between mb-4">
+                        <button
+                            onClick={() => setActiveSlide((s) => Math.max(0, s - 1))}
+                            disabled={activeSlide === 0}
+                            className="text-primary disabled:opacity-30 font-semibold"
+                        >
                             ◀
                         </button>
-                        <span>Party {activeSlide + 1} of {parties.length}</span>
+                        <span className="text-sm font-semibold text-on-surface-variant">
+                            Party {activeSlide + 1} of {parties.length}
+                        </span>
                         <button
                             onClick={() => setActiveSlide((s) => Math.min(parties.length - 1, s + 1))}
                             disabled={activeSlide === parties.length - 1}
+                            className="text-primary disabled:opacity-30 font-semibold"
                         >
                             ▶
                         </button>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        <label>
-                            Full Name
-                            <input
-                                value={activeParty.full_name}
-                                onChange={(e) => updateActiveParty("full_name", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
-                        <label>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {[
+                            { label: "Full Name", field: "full_name" as const, type: "text" },
+                            { label: "Relation Name", field: "relation_name" as const, type: "text" },
+                            { label: "Age", field: "age" as const, type: "number" },
+                            { label: "Address", field: "address" as const, type: "text" },
+                            { label: "State", field: "state" as const, type: "text" },
+                            { label: "Country", field: "country" as const, type: "text" },
+                        ].map(({ label, field, type }) => (
+                            <label key={field} className="text-xs font-semibold uppercase text-on-surface-variant">
+                                {label}
+                                <input
+                                    type={type}
+                                    value={(activeParty[field] as any) ?? ""}
+                                    onChange={(e) =>
+                                        updateActiveParty(field, type === "number" ? (e.target.value ? Number(e.target.value) : null) : e.target.value)
+                                    }
+                                    className="w-full mt-1 p-2 text-sm rounded-lg border border-outline-variant bg-white focus:outline-none focus:border-primary font-normal"
+                                />
+                            </label>
+                        ))}
+                        <label className="text-xs font-semibold uppercase text-on-surface-variant">
                             Relation
                             <select
                                 value={activeParty.relation_type}
                                 onChange={(e) => updateActiveParty("relation_type", e.target.value)}
-                                style={{ width: "100%" }}
+                                className="w-full mt-1 p-2 text-sm rounded-lg border border-outline-variant bg-white focus:outline-none focus:border-primary font-normal"
                             >
                                 <option value="">--</option>
                                 <option value="S/O">S/O</option>
@@ -230,50 +244,12 @@ function PartyListEditor({ label }: { label: string }) {
                                 <option value="C/O">C/O</option>
                             </select>
                         </label>
-                        <label>
-                            Relation Name
-                            <input
-                                value={activeParty.relation_name}
-                                onChange={(e) => updateActiveParty("relation_name", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
-                        <label>
-                            Age
-                            <input
-                                type="number"
-                                value={activeParty.age ?? ""}
-                                onChange={(e) => updateActiveParty("age", e.target.value ? Number(e.target.value) : null)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
-                        <label>
-                            Address
-                            <input
-                                value={activeParty.address}
-                                onChange={(e) => updateActiveParty("address", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
-                        <label>
-                            State
-                            <input
-                                value={activeParty.state}
-                                onChange={(e) => updateActiveParty("state", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
-                        <label>
-                            Country
-                            <input
-                                value={activeParty.country}
-                                onChange={(e) => updateActiveParty("country", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
                     </div>
 
-                    <button onClick={removeActiveParty} style={{ marginTop: 8, color: "red" }}>
+                    <button
+                        onClick={removeActiveParty}
+                        className="mt-4 text-error text-sm font-semibold hover:underline"
+                    >
                         Remove this party
                     </button>
                 </div>
@@ -284,10 +260,27 @@ function PartyListEditor({ label }: { label: string }) {
 
 export default function PartiesPage() {
     return (
-        <div style={{ maxWidth: 900, margin: "40px auto", padding: 20, fontFamily: "sans-serif" }}>
-            <h1>Petitioner-Opponent Party Extractor</h1>
-            <PartyListEditor label="Petitioner / Appellant / Complainant" />
-            <PartyListEditor label="Respondent / Opposite Party" />
+        <div className="font-body-md text-on-surface bg-[#FAF9F6] min-h-screen relative selection:bg-primary-fixed selection:text-on-primary-fixed">
+            <div
+                className="fixed inset-0 z-0 pointer-events-none opacity-[0.03]"
+                style={{ backgroundImage: 'url("https://www.transparenttextures.com/patterns/parchment.png")' }}
+            ></div>
+
+            <div className="relative z-10 flex flex-col min-h-screen">
+                <Navbar />
+
+                <main className="max-w-[900px] mx-auto px-4 md:px-10 pt-16 pb-24 w-full">
+                    <h1 className="font-display-lg text-4xl font-bold mb-2 text-on-background">
+                        Petitioner-Opponent Party Extractor
+                    </h1>
+                    <p className="font-body-lg text-on-surface-variant mb-10">
+                        Type, upload a document, or dictate party details — for both sides of the case.
+                    </p>
+
+                    <PartyListEditor label="Petitioner / Appellant / Complainant" />
+                    <PartyListEditor label="Respondent / Opposite Party" />
+                </main>
+            </div>
         </div>
     );
 }
