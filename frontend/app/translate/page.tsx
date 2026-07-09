@@ -24,6 +24,7 @@ export default function TranslatePage() {
     const [voiceError, setVoiceError] = useState("");
     const [hindiText, setHindiText] = useState("");
     const [englishText, setEnglishText] = useState("");
+    const [voicePdfDownloading, setVoicePdfDownloading] = useState(false);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
 
@@ -181,6 +182,50 @@ export default function TranslatePage() {
         }
     };
 
+    const handleVoiceSaveTxt = () => {
+        const blob = new Blob([englishText], { type: "text/plain" });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "drafted_legal_facts.txt";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+    };
+
+    const handleVoiceSavePdf = async () => {
+        if (!englishText) return;
+        setVoicePdfDownloading(true);
+
+        try {
+            const response = await fetch(`${API_BASE}/download-pdf`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text: englishText,
+                    title: "Drafted Legal Facts",
+                }),
+            });
+
+            if (!response.ok) throw new Error("Failed to generate PDF");
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "drafted_legal_facts.pdf";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            setVoiceError(`PDF download failed: ${err}`);
+        } finally {
+            setVoicePdfDownloading(false);
+        }
+    };
+
     return (
         <div style={{ maxWidth: 800, margin: "40px auto", padding: 20, fontFamily: "sans-serif" }}>
             <h1>Legal Document Translator</h1>
@@ -228,7 +273,7 @@ export default function TranslatePage() {
 
             <hr style={{ margin: "40px 0" }} />
 
-            <h2>Voice: Hindi Speech → English</h2>
+            <h2>Voice: Hindi Speech → English Facts</h2>
 
             <button
                 onClick={isRecording ? stopRecording : startRecording}
@@ -253,12 +298,41 @@ export default function TranslatePage() {
                 </div>
             )}
 
-            {englishText && (
-                <div style={{ marginTop: 20 }}>
-                    <h3>English Translation</h3>
-                    <pre style={{ whiteSpace: "pre-wrap", background: "#f5f5f5", padding: 12 }}>{englishText}</pre>
+            <div style={{ marginTop: 20 }}>
+                <h3>Drafted English Facts (editable)</h3>
+                <textarea
+                    value={englishText}
+                    onChange={(e) => setEnglishText(e.target.value)}
+                    placeholder="Click 'Start Recording' and speak in Hindi, or type your facts here manually..."
+                    style={{
+                        width: "100%",
+                        minHeight: 200,
+                        padding: 12,
+                        fontFamily: "inherit",
+                        fontSize: 14,
+                        background: "#f5f5f5",
+                        border: "1px solid #ccc",
+                        borderRadius: 4,
+                        boxSizing: "border-box",
+                    }}
+                />
+                <div style={{ marginTop: 8 }}>
+                    <button
+                        onClick={handleVoiceSaveTxt}
+                        disabled={!englishText}
+                        style={{ padding: "8px 16px", marginRight: 8 }}
+                    >
+                        Save as TXT
+                    </button>
+                    <button
+                        onClick={handleVoiceSavePdf}
+                        disabled={!englishText || voicePdfDownloading}
+                        style={{ padding: "8px 16px" }}
+                    >
+                        {voicePdfDownloading ? "Generating PDF..." : "Save as PDF"}
+                    </button>
                 </div>
-            )}
+            </div>
         </div>
     );
 }
