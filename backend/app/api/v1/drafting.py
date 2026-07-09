@@ -156,7 +156,7 @@ async def _rag_stream(req: GenerateRequest):
             messages=[{"role": "user", "content": prompt}],
             stream=True,
             temperature=0.2,
-            max_tokens=4096,
+            max_tokens=8192,
         )
         async for chunk in stream:
             delta = chunk.choices[0].delta.content if chunk.choices else None
