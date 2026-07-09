@@ -45,11 +45,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
+# Run as non-root for security hardening
+RUN addgroup --system app && adduser --system --ingroup app app
+
 # Copy compiled site-packages from builder (not pip, not build tools)
 COPY --from=builder /install/deps /usr/local
 
-# Copy pre-downloaded model weights
-COPY --from=builder /model_cache /model_cache
+# Copy pre-downloaded model weights and give ownership to the app user
+COPY --from=builder --chown=app:app /model_cache /model_cache
 
 # Tell HuggingFace / sentence-transformers to use our baked-in cache.
 # ENV values must NOT have inline comments — that is invalid Dockerfile syntax.
@@ -62,15 +65,13 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Copy application source LAST (changes most often = cheapest cache miss)
-COPY . .
+COPY --chown=app:app . .
 
 # Strip files that should not be in a running container
 RUN find /app -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
     find /app -name "*.pyc" -o -name "*.pyo" | xargs rm -f 2>/dev/null; \
     rm -rf /app/alembic /app/scripts /app/tests /app/venv /app/.venv /app/cache_model.py
 
-# Run as non-root for security hardening
-RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 
 EXPOSE 8000
