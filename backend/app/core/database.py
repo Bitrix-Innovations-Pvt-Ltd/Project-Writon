@@ -23,8 +23,11 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
-    pool_size=10,       # as recommended in Architecture PDF (max 10)
-    max_overflow=5
+    pool_size=30,
+    max_overflow=20,
+    pool_timeout=60,
+    pool_pre_ping=True,    # Checks if connection is alive before using it
+    pool_recycle=1800      # Recycles connections after 30 minutes to avoid DB timeouts
 )
 
 AsyncSessionLocal = async_sessionmaker(

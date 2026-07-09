@@ -1,0 +1,56 @@
+[
+  {
+    "id": 1,
+    "legal_code_id": 8,
+    "section_number": "22",
+    "title": "Persons liable for registration",
+    "section_text": "Every supplier shall be liable to be registered under this Act in the State or Union territory, other than special category States, from where he makes a taxable supply of goods or services or both, if his aggregate turnover in a financial year exceeds twenty lakh rupees.",
+    "embedding": null,
+    "corresponds_to": null
+  },
+  {
+    "id": 2,
+    "legal_code_id": 8,
+    "section_number": "29",
+    "title": "Cancellation or suspension of registration",
+    "section_text": "The proper officer may, either on his own motion or on an application filed by the registered person or by his legal heirs, in such manner as may be prescribed, cancel the registration, in such circumstances where the business has been discontinued, transferred fully for any reason including death of the proprietor.",
+    "embedding": null,
+    "corresponds_to": null
+  },
+  {
+    "id": 3,
+    "legal_code_id": 8,
+    "section_number": "54",
+    "title": "Refund of tax",
+    "section_text": "Any person claiming refund of any tax and interest, if any, paid on such tax or any other amount paid by him, may make an application before the expiry of two years from the relevant date in such form and manner as may be prescribed.",
+    "embedding": null,
+    "corresponds_to": null
+  },
+  {
+    "id": 4,
+    "legal_code_id": 8,
+    "section_number": "61",
+    "title": "Scrutiny of returns",
+    "section_text": "The proper officer may scrutinize the return and related particulars furnished by the registered person to verify the correctness of the return and inform him of the discrepancies noticed, if any, in such manner as may be prescribed and seek his explanation thereto.",
+    "embedding": null,
+    "corresponds_to": null
+  },
+  {
+    "id": 5,
+    "legal_code_id": 8,
+    "section_number": "67",
+    "title": "Power of inspection, search and seizure",
+    "section_text": "Where the proper officer, not below the rank of Joint Commissioner, has reasons to believe that a taxable person has suppressed any transaction relating to supply of goods or services or both or the stock of goods in hand, he may authorize in writing any other officer of central tax to inspect any places of business of the taxable person and seize such goods, documents or books.",
+    "embedding": null,
+    "corresponds_to": null
+  },
+  {
+    "id": 6,
+    "legal_code_id": 8,
+    "section_number": "73",
+    "title": "Determination of tax not paid or short paid or erroneously refunded for reasons other than fraud",
+    "section_text": "Where it appears to the proper officer that any tax has not been paid or short paid or erroneously refunded, or where input tax credit has been wrongly availed or utilised for any reason, other than the reason of fraud or any wilful-misstatement or suppression of facts to evade tax, he shall serve notice on the person chargeable with tax.",
+    "embedding": null,
+    "corresponds_to": null
+  }
+]

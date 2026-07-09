@@ -30,3 +30,4 @@ PyMuPDF
 
 # LLM Integrations
 openai
+jinja2==3.1.4

@@ -1,0 +1,44 @@
+{% include "base_rules.txt" %}
+
+DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
+
+{{ jurisdiction_warning }}
+
+CASE DETAILS:
+- Petitioner(s): {{ petitioners }}
+- Respondent(s): {{ respondents }}
+- Advocate: {{ form_data.advocate_name | default('Not provided') }} (Enrollment: {{ form_data.advocate_enrollment_no | default('') }})
+- Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('') }}
+- Impugned Order Date: {{ form_data.impugned_order_date | default('Not applicable') }}
+
+FACTS:
+{{ form_data.facts_of_case }}
+
+GROUNDS (user-provided):
+{{ form_data.grounds | default('Not provided — draft standard grounds based on facts') }}
+
+RELIEF SOUGHT:
+{{ form_data.relief_sought }}
+
+INTERIM RELIEF:
+{{ form_data.interim_relief_sought | default('Not specifically requested') }}
+
+{{ uploaded_docs_context }}
+
+RELEVANT STATUTES:
+{{ statutes_block }}
+
+RELEVANT PRECEDENTS:
+{{ judgments_block }}
+
+REQUIRED SECTIONS (in this exact order):
+<<SECTION:COVER_AND_INDEX>>
+<<SECTION:SYNOPSIS>>
+<<SECTION:LIST_OF_DATES>>
+<<SECTION:MAIN_PETITION>>
+<<SECTION:PRAYER>>
+<<SECTION:AFFIDAVIT>>
+<<SECTION:VAKALATNAMA>>
+<<SECTION:ANNEXURES>>
+
+Begin drafting now.

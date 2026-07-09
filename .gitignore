@@ -57,6 +57,7 @@ share/python-wheels/
 .coverage
 htmlcov/
 .mypy_cache/
+scratch/
 
 # Logs
 *.log

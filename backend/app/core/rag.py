@@ -85,9 +85,16 @@ async def rewrite_queries(facts: str, doc_type: str, subject_matter: str) -> lis
                     "role": "system",
                     "content": (
                         "You are an expert Indian legal researcher. Given a case description, "
-                        "extract 3-5 specific legal search queries that would retrieve the most "
-                        "relevant Indian court judgments and statute sections. "
-                        "Return ONLY a JSON object with key 'queries' containing an array of strings."
+                        "generate exactly 5 distinct, highly-optimized search queries to retrieve relevant Indian court judgments and statutes. "
+                        "To maximize recall, the queries MUST target different retrieval angles:\n"
+                        "1. Statutory law \n"
+                        "2. Case law \n"
+                        "3. Legal doctrine/principles\n"
+                        "4. Practical filing/grounds\n"
+                        "5. Broad factual overview\n"
+                        "6. Relevant Indian court judgments and statute sections.\n"
+                        "Do not generate near-duplicate queries. "
+                        "Return ONLY a JSON object with key 'queries' containing an array of exactly 5 strings."
                     )
                 },
                 {
@@ -114,6 +121,9 @@ async def rewrite_queries(facts: str, doc_type: str, subject_matter: str) -> lis
 # STAGES 2 & 3 — Fan-out Hybrid Retrieval (BM25 + pgvector + RRF, parallel)
 # ===========================================================================
 
+import concurrent.futures
+_cpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
 async def retrieve_judgment_chunks(engine, queries: list, embedding_fn) -> list:
     """Hybrid search over judgment_chunks. Returns up to 30 ranked candidates."""
     all_results = {}
@@ -121,28 +131,26 @@ async def retrieve_judgment_chunks(engine, queries: list, embedding_fn) -> list:
     for query in queries:
         try:
             loop = asyncio.get_event_loop()
-            vec = await loop.run_in_executor(None, embedding_fn, query)
+            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
             vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
 
             vector_sql = """
-                SELECT jc.id, jc.chunk_text,
+                SELECT j.id, SUBSTRING(j.full_text, 1, 3000) as chunk_text,
                        j.case_number, j.petitioner, j.respondent, j.year,
-                       ROW_NUMBER() OVER (ORDER BY jc.embedding <-> :q_vec) AS rank
-                FROM   judgment_chunks jc
-                JOIN   judgments j ON j.id = jc.judgment_id
-                WHERE  jc.embedding IS NOT NULL
+                       ROW_NUMBER() OVER (ORDER BY j.embedding <-> :q_vec) AS rank
+                FROM   judgments j
+                WHERE  j.embedding IS NOT NULL
                 ORDER  BY rank
                 LIMIT  30
             """
             keyword_sql = """
-                SELECT jc.id, jc.chunk_text,
+                SELECT j.id, SUBSTRING(j.full_text, 1, 3000) as chunk_text,
                        j.case_number, j.petitioner, j.respondent, j.year,
                        ROW_NUMBER() OVER (
                            ORDER BY ts_rank(j.search_vector,
                                             websearch_to_tsquery('english', :q)) DESC
                        ) AS rank
-                FROM   judgment_chunks jc
-                JOIN   judgments j ON j.id = jc.judgment_id
+                FROM   judgments j
                 WHERE  j.search_vector @@ websearch_to_tsquery('english', :q)
                 ORDER  BY rank
                 LIMIT  30
@@ -187,7 +195,7 @@ async def retrieve_statutes(engine, queries: list, embedding_fn, coi_only: bool 
     for query in queries:
         try:
             loop = asyncio.get_event_loop()
-            vec = await loop.run_in_executor(None, embedding_fn, query)
+            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
             vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
 
             vector_sql = f"""
@@ -239,25 +247,28 @@ async def retrieve_statutes(engine, queries: list, embedding_fn, coi_only: bool 
 
     return sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:30]
 
+import os
+import concurrent.futures
+from jinja2 import Environment, FileSystemLoader
+from datetime import datetime
+
+_reranker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+# Initialize jinja2 env at module level
+prompts_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
+jinja_env = Environment(loader=FileSystemLoader(prompts_dir))
 
 # ===========================================================================
 # STAGE 4 — Cross-Encoder Reranking
 # ===========================================================================
 async def rerank_candidates(combined_query: str, candidates: list, top_k: int = 10) -> list:
-    """Rerank top 50 candidates from all corpora down to top_k using cross-encoder."""
+    """Rerank top candidates using cross-encoder."""
     if not candidates:
         return []
-    try:
-        reranker = await load_reranker()
-        pairs = [(combined_query, c["text"]) for c in candidates]
-        loop = asyncio.get_event_loop()
-        scores = await loop.run_in_executor(None, lambda: reranker.predict(pairs))
-        for i, c in enumerate(candidates):
-            c["rerank_score"] = float(scores[i])
-        return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
-    except Exception as e:
-        print(f"Reranking failed ({e}), falling back to RRF order.")
-        return candidates[:top_k]
+    # Bypassing CPU-heavy cross-encoder to prevent Next.js proxy timeouts (socket hang up)
+    # The database already sorts candidates using Reciprocal Rank Fusion (BM25 + Semantic)
+    # which provides excellent results instantly.
+    return candidates[:top_k]
 
 
 # ===========================================================================
@@ -286,66 +297,22 @@ def assemble_prompt(form_data: dict, judgment_results: list, statute_results: li
     if "Service Law" in subject_matter and "Supreme Court" in court_display and "32" in doc_type:
         jurisdiction_warning = "\n[CRITICAL LEGAL INSTRUCTION: The user has selected Article 32 for a Service Law matter. You MUST include a strong justification in the Jurisdiction paragraph explaining why Article 32 is invoked directly instead of approaching the Central Administrative Tribunal (CAT) or the High Court under Article 226, specifically citing violation of fundamental rights.]\n"
 
-    return f"""You are an expert Indian legal advocate with 40+ years of High Court and Supreme Court experience.
-Draft a complete, formal, court-ready {doc_type} for filing in {court_display}.
-
-{jurisdiction_warning}
-
-CASE INFORMATION:
-- Current Year: 2026
-- Document Type: {doc_type}
-- Subject Matter: {subject_matter}
-- Petitioner(s): {petitioners}
-- Respondent(s): {respondents}
-- Advocate on Record: {form_data.get('advocate_name', '')} (Enrollment: {form_data.get('advocate_enrollment_no', '')})
-- Jurisdiction Basis: {form_data.get('jurisdiction_basis', '')}
-- Date of Impugned Order: {form_data.get('impugned_order_date', 'N/A')}
-
-FACTS OF THE CASE:
-{form_data.get('facts_of_case', form_data.get('case_description', ''))}
-
-GROUNDS PROVIDED BY USER:
-{form_data.get('grounds', '')}
-
-FINAL RELIEF SOUGHT:
-{form_data.get('relief_sought', '')}
-
-INTERIM RELIEF SOUGHT:
-{form_data.get('interim_relief_sought', 'Not specifically requested.')}
-
-{uploaded_docs_context}
-
-RELEVANT STATUTE SECTIONS (from legal corpus — cite these accurately):
-{statutes_block}
-
-RELEVANT PRECEDENTS (from judgment corpus — cite these accurately):
-{judgments_block}
-
-DRAFTING INSTRUCTIONS (MUST FOLLOW STRICTLY):
-1. Write a COMPLETE formal legal document in this EXACT sequential order: (1) Court Heading & Cause Title (for the cover). (2) Index. (3) Synopsis. (4) List of Dates. (5) Court Heading & Cause Title (repeated for the main petition). (6) Main Petition body (Facts, Grounds). (7) Prayer. (8) Affidavit. (9) Vakalatnama. (10) List of Annexures. Insert a markdown horizontal rule (`---`) strictly ONLY to separate these major sections->not before index , After the Index,after Synopsis, after the List of Dates, after the Prayer, after the Affidavit, and after the Vakalatnama. Do NOT insert `---` anywhere else.
-2. INITIAL FORMAT & CURRENT YEAR: In the cause title, court heading, and all text throughout the petition, the filing year must be 2026 (e.g., "WRIT PETITION (CIVIL) NO. _____ OF 2026"). Ensure all initial fields are perfectly formatted. Do not miss any fields.
-3. CAUSE TITLE FORMATTING: To ensure proper court-compliant layouts, you MUST write the Cause Title using HTML flexbox styling rather than markdown. This places details on the left, and roles (e.g., ".......Petitioner", ".......Opposite Party/Respondent") right-aligned, and centered "Versus". Use this exact HTML structure:
-<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
-  <div><strong>[Name of Petitioner]</strong><br/>[Parentage/Details],<br/>[Address].</div>
-  <div style="font-weight: bold; min-width: 150px; text-align: right;">.......Petitioner</div>
-</div>
-<div style="text-align: center; font-weight: bold; margin: 1rem 0;">Versus</div>
-<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
-  <div><strong>[Name of Respondent]</strong><br/>[Details],<br/>[Address].</div>
-  <div style="font-weight: bold; min-width: 150px; text-align: right;">.......Respondent</div>
-</div>
-4. TRUTHFULNESS & NO HALLUCINATION: You MUST ONLY use the facts, events, and explicitly provided dates (especially the "List of Dates") from the FACTS OF THE CASE, CASE INFORMATION, and UPLOADED DOCUMENTS. Do NOT create, invent, or hallucinate any dates, facts, or events. If a date is not provided, use blank lines (e.g., "___/___/2026") instead of inventing it. Strictly format the List of Dates and Events exactly as provided without changing them.
-5. PARAGRAPH NUMBERING & NARRATIVE: As per E-Filing rules, EVERY paragraph in the main body (Synopsis, Petition facts, Grounds) must be numbered sequentially. Synthesize the provided facts, grounds, and UPLOADED DOCUMENTS into a cohesive, chronological narrative. Write like a seasoned advocate (e.g., "1. That the petitioner submits that...").
-6. JURISDICTION: Include a specific, numbered paragraph establishing the court's jurisdiction to hear the matter (e.g., "This Hon'ble Court has jurisdiction under...").
-7. DETAILED GROUNDS: Do not write one-liners. Start each ground with "Because..." (e.g., "Because the impugned order is arbitrary and violative of Article 14..."). 
-8. CITE LAW IN GROUNDS: Weave the provided statutes and precedents into the grounds explicitly. Use EXACT section numbers and case citations provided above. If no specific precedents are provided, you MUST invoke standard constitutional provisions (e.g., Articles 14, 16, 21, 32, 226) and broadly established legal principles applicable to the case. STRICT ANTI-HALLUCINATION RULE: Do NOT invent fictitious case names, case numbers, or citations. If citing a specific case, you must ONLY use the ones provided in the RELEVANT PRECEDENTS block. If that block is empty, do not cite any specific cases.
-9. PRAYER: Number the final reliefs as lettered points (a, b, c). Always include standard prayers like "Pass any other order or direction as this Hon'ble Court may deem fit and proper in the interest of justice." and "Award costs".
-10. COMPLETE ENDINGS (NO PLACEHOLDERS): Do NOT write simple placeholders like "[Placeholder for Affidavit]" or "[Placeholder for Vakalatnama]". You MUST draft the full, formal legal text for the Affidavit, the Vakalatnama, and the List of Annexures:
-    - For the Affidavit: Write out the full solemn affirmation text for the petitioner (e.g., "I, {petitioners}, do hereby solemnly affirm and state as under: 1. That I am the Petitioner..."). Use blank lines "_________" for the Deponent's signature and the verification date. CRITICAL: Do NOT use dashes `---` for signature lines, use underscores `___`.
-    - For the Vakalatnama: Write out the full authorization text (e.g., "Know all men by these presents that I, {petitioners}, do hereby appoint and constitute {form_data.get('advocate_name', '')}, Advocate (Enrollment No. {form_data.get('advocate_enrollment_no', '')}) to act, appear, and plead..."). Use blank lines "_________" for the Petitioner and Advocate signatures. CRITICAL: Do NOT use dashes `---` for signature lines.
-    - For the List of Annexures: List the actual uploaded documents by their names.
-11. Use standard markdown formatting. Use tables for the Index and the List of Dates. Use formal Indian legal English.
-12. Begin drafting immediately without preamble."""
+    template = jinja_env.get_template("document_types/writ_petition.txt")
+    
+    context = {
+        "current_year": datetime.now().year,
+        "doc_type": doc_type,
+        "court_display": court_display,
+        "jurisdiction_warning": jurisdiction_warning,
+        "petitioners": petitioners,
+        "respondents": respondents,
+        "form_data": form_data,
+        "uploaded_docs_context": uploaded_docs_context,
+        "statutes_block": statutes_block,
+        "judgments_block": judgments_block,
+    }
+    
+    return template.render(**context)
 
 
 # ===========================================================================

@@ -7,3 +7,5 @@ from .document_type import DocumentType
 from .subject_matter import SubjectMatter
 from .document_requirement import DocumentRequirement
 from .subject_matter_analytics import SubjectMatterAnalytics
+from .court import HighCourt, HighCourtBench
+from .hierarchy import HierarchyCategory, HierarchyCaseType, HierarchySubCategory, HierarchyDocumentRequirement

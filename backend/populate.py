@@ -10,9 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
 
 from app.core.database import AsyncSessionLocal
-from app.models.document_type import DocumentType
-from app.models.subject_matter import SubjectMatter
-from app.models.document_requirement import DocumentRequirement
+from app.models.hierarchy import HierarchyCategory, HierarchyCaseType, HierarchySubCategory, HierarchyDocumentRequirement
 from sqlalchemy import text
 
 async def populate():
@@ -21,77 +19,79 @@ async def populate():
         data = json.load(f)
     
     court_level = "high"
-    tribunal_name = data.get("court", "High Court of Judicature at Allahabad")
     
     async with AsyncSessionLocal() as session:
-        # Clear existing data for this tribunal to prevent duplicates
-        await session.execute(text("DELETE FROM document_requirements WHERE court_level = 'high'"))
-        await session.execute(text("DELETE FROM subject_matters WHERE court_level = 'high'"))
-        await session.execute(text("DELETE FROM document_types WHERE court_level = 'high'"))
+        # Clear existing data
+        await session.execute(text("DELETE FROM hierarchy_document_requirements"))
+        await session.execute(text("DELETE FROM hierarchy_sub_categories"))
+        await session.execute(text("DELETE FROM hierarchy_case_types"))
+        await session.execute(text("DELETE FROM hierarchy_categories"))
         
-        common_docs = data.get("documentsCommonToEveryFiling", [])
-        
-        doc_type_order = 1
-        matter_order = 1
+        cat_order = 1
+        case_type_order = 1
+        sub_cat_order = 1
         req_order = 1
         
         for category in data.get("categories", []):
             cat_name = category.get("name") # e.g. "PETITION"
             cat_summary = category.get("summary") # e.g. "Writ & original"
+            cat_desc = category.get("description")
+            cat_code = category.get("code")
             
-            # 1. Insert DocumentType (The 5 categories)
-            dt = DocumentType(
+            # 1. Insert HierarchyCategory
+            hc = HierarchyCategory(
                 court_level=court_level,
-                tribunal_name=tribunal_name,
-                doc_type_name=cat_name, 
-                category=cat_summary,
-                sort_order=doc_type_order
+                name=cat_name, 
+                summary=cat_summary,
+                description=cat_desc,
+                code=cat_code,
+                sort_order=cat_order
             )
-            session.add(dt)
-            doc_type_order += 1
+            session.add(hc)
+            await session.flush() # flush to get id
+            cat_order += 1
             
             for case_type in category.get("caseTypes", []):
                 case_type_name = case_type.get("name")
-                sub_categories = case_type.get("subCategories", [])
-                file_with = case_type.get("fileWith", [])
-                all_docs = common_docs + file_with
+                case_type_code = case_type.get("code")
+                is_defective = case_type.get("defective", False)
                 
-                # If there are subcategories, we map each one as a distinct SubjectMatter 
-                # (e.g. "Criminal Misc. Writ Petition - Stay of arrest")
-                # If there are none, we just use the case_type_name (e.g. "Company Petition")
-                matters_to_create = []
-                if sub_categories:
-                    for sub in sub_categories:
-                        matters_to_create.append(f"{case_type_name} — {sub}")
-                else:
-                    matters_to_create.append(case_type_name)
-                    
-                for matter_name in matters_to_create:
-                    # 2. Insert SubjectMatter
-                    sm = SubjectMatter(
-                        court_level=court_level,
-                        tribunal_name=tribunal_name,
-                        matter_name=matter_name,
-                        applicable_doc_types=[cat_name],
-                        sort_order=matter_order
+                # 2. Insert HierarchyCaseType
+                hct = HierarchyCaseType(
+                    category_id=hc.id,
+                    name=case_type_name,
+                    code=case_type_code,
+                    defective=is_defective,
+                    sort_order=case_type_order
+                )
+                session.add(hct)
+                await session.flush() # flush to get id
+                case_type_order += 1
+                
+                # 3. Insert SubCategories
+                for sub in case_type.get("subCategories", []):
+                    hsc = HierarchySubCategory(
+                        case_type_id=hct.id,
+                        name=sub,
+                        sort_order=sub_cat_order
                     )
-                    session.add(sm)
-                    matter_order += 1
+                    session.add(hsc)
+                    sub_cat_order += 1
                     
-                    # 3. Insert DocumentRequirements for this Subject Matter
-                    for doc in all_docs:
-                        req = DocumentRequirement(
-                            court_level=court_level,
-                            subject_matter=matter_name,
-                            document_name=doc,
-                            requirement_type="required",
-                            sort_order=req_order
-                        )
-                        session.add(req)
-                        req_order += 1
+                # 4. Insert Document Requirements
+                for doc in case_type.get("fileWith", []):
+                    req_type = "optional" if any(keyword in doc.lower() for keyword in ["if any", "if relevant", "if applicable", "if available"]) else "required"
+                    req = HierarchyDocumentRequirement(
+                        case_type_id=hct.id,
+                        document_name=doc,
+                        requirement_type=req_type,
+                        sort_order=req_order
+                    )
+                    session.add(req)
+                    req_order += 1
                             
         await session.commit()
-        print("Data successfully repopulated with sub-categories!")
+        print("Data successfully populated into normalized hierarchy tables!")
 
 if __name__ == "__main__":
     asyncio.run(populate())

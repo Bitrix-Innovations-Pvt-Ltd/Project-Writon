@@ -1,3 +1,5 @@
+import os
+
 import asyncio
 import uvicorn
 from fastapi import FastAPI
@@ -11,6 +13,8 @@ from app.api.v1 import (
     analytics as analytics_v1,
     uploads as uploads_v1,
     drafting as drafting_v1,
+    courts as courts_v1,
+    hierarchy as hierarchy_v1,
 )
 
 app = FastAPI(title="WritOnline API")
@@ -31,6 +35,8 @@ app.include_router(document_requirements_v1.router, prefix="/api/v1")
 app.include_router(analytics_v1.router, prefix="/api/v1")
 app.include_router(uploads_v1.router, prefix="/api/v1")
 app.include_router(drafting_v1.router, prefix="/api/v1")
+app.include_router(courts_v1.router, prefix="/api/v1/courts")
+app.include_router(hierarchy_v1.router, prefix="/api/v1/hierarchy")
 
 
 @app.on_event("startup")

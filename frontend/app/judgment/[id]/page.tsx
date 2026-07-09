@@ -18,7 +18,6 @@ interface JudgmentDetail {
 
 export default function JudgmentDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const id = params?.id;
 
   const [judgment, setJudgment] = useState<JudgmentDetail | null>(null);
@@ -88,7 +87,7 @@ export default function JudgmentDetailPage() {
         setJudgment(data);
         setLoading(false);
       })
-      .catch((err) => {
+      .catch(() => {
         setError('Could not load judgment. Please ensure the backend is running.');
         setLoading(false);
       });

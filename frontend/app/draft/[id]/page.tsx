@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Navbar from '@/components/shared/Navbar';
-import Link from 'next/link';
 import { useAuth } from '@clerk/nextjs';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,16 +10,6 @@ import rehypeRaw from 'rehype-raw';
 import { districtCourtsData, tribunalsData, specialCourtsData } from './courtsData';
 
 const indianStates = Object.keys(districtCourtsData).sort();
-
-const highCourts = [
-  "Allahabad High Court", "Andhra Pradesh High Court", "Bombay High Court", "Calcutta High Court", 
-  "Chhattisgarh High Court", "Delhi High Court", "Gauhati High Court", "Gujarat High Court", 
-  "Himachal Pradesh High Court", "Jammu & Kashmir and Ladakh High Court", "Jharkhand High Court", 
-  "Karnataka High Court", "Kerala High Court", "Madhya Pradesh High Court", "Madras High Court", 
-  "Manipur High Court", "Meghalaya High Court", "Orissa High Court", "Patna High Court", 
-  "Punjab and Haryana High Court", "Rajasthan High Court", "Sikkim High Court", 
-  "Telangana High Court", "Tripura High Court", "Uttarakhand High Court"
-];
 
 const getDistrictCourtsForState = (state: string) => {
   if (!state) return [];
@@ -80,10 +69,32 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [courtLevel, setCourtLevel] = useState('supreme');
   const [documentType, setDocumentType] = useState('');
   const [subjectMatter, setSubjectMatter] = useState('');
-  const [selectedMainMatter, setSelectedMainMatter] = useState('');
   const [caseDescription, setCaseDescription] = useState('');
+  const [factsOfCase, setFactsOfCase] = useState('');
+  const [grounds, setGrounds] = useState('');
+  const [reliefSought, setReliefSought] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({}); 
   const [uploadError, setUploadError] = useState<string | null>(null); 
+  
+  // Citations State
+  const [suggestedJudgments, setSuggestedJudgments] = useState<any[]>([]);
+  const [suggestedStatutes, setSuggestedStatutes] = useState<any[]>([]);
+  const [selectedJudgmentIds, setSelectedJudgmentIds] = useState<Set<number>>(new Set());
+  const [selectedStatuteIds, setSelectedStatuteIds] = useState<Set<number>>(new Set());
+  const [isLoadingCitations, setIsLoadingCitations] = useState(false); 
+  
+  // New Hierarchy States
+  const [selectedCategory, setSelectedCategory] = useState<any>(null);
+  const [selectedCaseType, setSelectedCaseType] = useState<any>(null);
+  const [selectedSubCategory, setSelectedSubCategory] = useState<any>(null);
+
+  const [categoriesList, setCategoriesList] = useState<any[]>([]);
+  const [caseTypesList, setCaseTypesList] = useState<any[]>([]);
+  const [subCategoriesList, setSubCategoriesList] = useState<any[]>([]);
+  
+  const [isLoadingCategories, setIsLoadingCategories] = useState(false);
+  const [isLoadingCaseTypes, setIsLoadingCaseTypes] = useState(false);
+  const [isLoadingSubCategories, setIsLoadingSubCategories] = useState(false);
   
   // Step 5: Parties & Facts State
   const [advocateName, setAdvocateName] = useState('');
@@ -95,25 +106,44 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [interimReliefSought, setInterimReliefSought] = useState('');
 
   const [selectedHighCourt, setSelectedHighCourt] = useState('');
+  const [selectedHighCourtBench, setSelectedHighCourtBench] = useState('');
   const [selectedState, setSelectedState] = useState('');
   const [selectedDistrictCourt, setSelectedDistrictCourt] = useState('');
   const [selectedSubLevel, setSelectedSubLevel] = useState<'tribunal' | 'special_court' | ''>('');
   const [selectedTribunal, setSelectedTribunal] = useState('');
   const [selectedSpecialCourt, setSelectedSpecialCourt] = useState('');
   const [documentTypes, setDocumentTypes] = useState<string[]>([]);
-  const [isLoadingDocTypes, setIsLoadingDocTypes] = useState(false);
   const [subjectMattersList, setSubjectMattersList] = useState<{matter_name: string, applicable_doc_types: string[]}[]>([]);
-  const [isLoadingSubjectMatters, setIsLoadingSubjectMatters] = useState(false);
   
   const [requiredDocsList, setRequiredDocsList] = useState<any[]>([]);
   const [optionalDocsList, setOptionalDocsList] = useState<any[]>([]);
   const [isLoadingDocs, setIsLoadingDocs] = useState(false);
+  const [isLoadingDocTypes, setIsLoadingDocTypes] = useState(false);
+  const [isLoadingSubjectMatters, setIsLoadingSubjectMatters] = useState(false);
+
+  const [highCourtsApiData, setHighCourtsApiData] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchHighCourts = async () => {
+      try {
+        const res = await fetch('/api/v1/courts/high-courts');
+        const data = await res.json();
+        setHighCourtsApiData(data);
+      } catch (err) {
+        console.error("Failed to fetch high courts", err);
+      }
+    };
+    fetchHighCourts();
+  }, []);
 
   // Generation state
   const [generateStatus, setGenerateStatus] = useState<'idle' | 'loading' | 'streaming' | 'completed'>('idle');
   const [generateStatusText, setGenerateStatusText] = useState('Generating your draft...');
   const [draftContent, setDraftContent] = useState('');
   const [isEditingMode, setIsEditingMode] = useState(false);
+  const [htmlPages, setHtmlPages] = useState<string[]>([]);
+  const [hasEdited, setHasEdited] = useState(false);
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [citations, setCitations] = useState<{citation: string, type: string, status: string}[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
 
@@ -266,12 +296,99 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     fetchSubjectMatters();
   }, [courtLevel, selectedSubLevel, selectedTribunal, selectedSpecialCourt]);
 
-  // Reset selected subject matter if it's no longer in the fetched list
+  // Reset selected subject matter if it's no longer in the fetched list, 
+  // BUT only if we are using the old fallback UI (categoriesList is empty or fake).
   useEffect(() => {
-    if (subjectMattersList.length > 0 && !subjectMattersList.some(sm => sm.matter_name === subjectMatter)) {
-      setSubjectMatter('');
+    const isUsingOldUI = !categoriesList.length || (selectedCategory && selectedCategory.id >= 1000);
+    if (isUsingOldUI && subjectMatter && subjectMattersList.length > 0) {
+      // Only clear if it's not in the old list and not a custom text (since they can type anything if list is empty, but if list > 0 they must select)
+      if (!subjectMattersList.some(sm => sm.matter_name === subjectMatter)) {
+        // If they typed something manually ("Other"), don't clear it immediately, but for now we just check
+        // if it's not in the list. Wait, in the old UI they can't type if list > 0.
+        setSubjectMatter('');
+      }
     }
-  }, [subjectMattersList]);
+  }, [subjectMattersList, categoriesList, selectedCategory, subjectMatter]);
+
+
+  // ------------- NEW HIERARCHY HOOKS -------------
+  useEffect(() => {
+    const fetchCategories = async () => {
+      let level = courtLevel;
+      if (level === 'tribunal' && selectedSubLevel === 'special_court') {
+        level = 'special_court';
+      }
+      try {
+        setIsLoadingCategories(true);
+        const res = await fetch(`/api/v1/hierarchy/categories?court_level=${level}`);
+        if (res.ok) {
+          const data = await res.json();
+          setCategoriesList(data);
+          
+          // If no categories, fallback to documentTypes array for UI mapping
+          if (data.length === 0 && documentTypes.length > 0) {
+             const fakeCats = documentTypes.map((dt, i) => ({ id: i+1000, name: dt }));
+             setCategoriesList(fakeCats);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoadingCategories(false);
+      }
+    };
+    fetchCategories();
+  }, [courtLevel, selectedSubLevel, documentTypes]);
+
+  useEffect(() => {
+    if (!selectedCategory) {
+      setCaseTypesList([]);
+      return;
+    }
+    const fetchCaseTypes = async () => {
+      // If it's a fallback fake category, just set caseTypes to empty
+      if (selectedCategory.id >= 1000) {
+         setCaseTypesList([]);
+         return;
+      }
+      try {
+        setIsLoadingCaseTypes(true);
+        const res = await fetch(`/api/v1/hierarchy/case-types?category_id=${selectedCategory.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setCaseTypesList(data);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoadingCaseTypes(false);
+      }
+    };
+    fetchCaseTypes();
+  }, [selectedCategory]);
+
+  useEffect(() => {
+    if (!selectedCaseType) {
+      setSubCategoriesList([]);
+      return;
+    }
+    const fetchSubCategories = async () => {
+      try {
+        setIsLoadingSubCategories(true);
+        const res = await fetch(`/api/v1/hierarchy/sub-categories?case_type_id=${selectedCaseType.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSubCategoriesList(data);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoadingSubCategories(false);
+      }
+    };
+    fetchSubCategories();
+  }, [selectedCaseType]);
+  // -----------------------------------------------
 
   // Fetch document requirements when entering Step 4
   useEffect(() => {
@@ -311,7 +428,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     { num: 3, label: 'Subject Matter' },
     { num: 4, label: 'Documents' },
     { num: 5, label: 'Parties & Facts' },
-    { num: 6, label: 'Generate' },
+    { num: 6, label: 'Citations' },
+    { num: 7, label: 'Generate' },
   ];
 
   const totalDocs = requiredDocsList.length + optionalDocsList.length;
@@ -338,11 +456,71 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       }
     }
 
-    if (currentStep < 6) {
+    if (currentStep === 5) {
+      setCurrentStep(6);
+      fetchCitations();
+    } else if (currentStep < 7) {
       setCurrentStep(currentStep + 1);
-      if (currentStep + 1 === 6) {
+      if (currentStep + 1 === 7) {
         startGeneration();
       }
+    }
+  };
+
+  const fetchCitations = async () => {
+    setIsLoadingCitations(true);
+    setSuggestedJudgments([]);
+    setSuggestedStatutes([]);
+    
+    const courtDisplay =
+      courtLevel === 'high' && selectedHighCourt ? `${selectedHighCourt}${selectedHighCourtBench ? ` - ${selectedHighCourtBench}` : ''}` :
+      courtLevel === 'district' && selectedDistrictCourt ? `${selectedDistrictCourt} District Court, ${selectedState}` :
+      courtLevel === 'tribunal' && selectedTribunal ? selectedTribunal :
+      courtLevel === 'tribunal' && selectedSpecialCourt ? selectedSpecialCourt :
+      `${courtLevel.charAt(0).toUpperCase() + courtLevel.slice(1)} Court of India`;
+
+    const body = {
+      court_level: courtLevel,
+      court_display: courtDisplay,
+      document_type: documentType,
+      subject_matter: subjectMatter,
+      case_description: caseDescription,
+      facts_of_case: factsOfCase,
+      grounds: grounds,
+      relief_sought: reliefSought,
+      interim_relief_sought: interimReliefSought,
+      advocate_name: advocateName,
+      advocate_enrollment_no: advocateEnrollmentNo,
+      petitioners: petitioners.filter(p => p.trim()),
+      respondents: respondents.filter(r => r.trim()),
+      jurisdiction_basis: jurisdictionBasis,
+      impugned_order_date: impugnedOrderDate || null,
+      draft_id: params?.id ? parseInt(params.id) : undefined
+    };
+
+    try {
+      const res = await fetch('/api/v1/drafts/suggest-citations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSuggestedJudgments(data.judgments || []);
+        setSuggestedStatutes(data.statutes || []);
+        
+        // Select all by default
+        setSelectedJudgmentIds(new Set((data.judgments || []).map((j: any) => j.id)));
+        setSelectedStatuteIds(new Set((data.statutes || []).map((s: any) => s.id)));
+      } else {
+        console.error("Failed to fetch citations:", await res.text());
+        alert("Failed to fetch citations from the server.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Network error while fetching citations.");
+    } finally {
+      setIsLoadingCitations(false);
     }
   };
 
@@ -357,7 +535,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     setCitations([]);
 
     const courtDisplay =
-      courtLevel === 'high' && selectedHighCourt ? selectedHighCourt :
+      courtLevel === 'high' && selectedHighCourt ? `${selectedHighCourt}${selectedHighCourtBench ? ` - ${selectedHighCourtBench}` : ''}` :
       courtLevel === 'district' && selectedDistrictCourt ? `${selectedDistrictCourt} District Court, ${selectedState}` :
       courtLevel === 'tribunal' && selectedTribunal ? selectedTribunal :
       courtLevel === 'tribunal' && selectedSpecialCourt ? selectedSpecialCourt :
@@ -379,6 +557,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       respondents: respondents.filter(r => r.trim()),
       jurisdiction_basis: jurisdictionBasis,
       impugned_order_date: impugnedOrderDate || null,
+      selected_judgments: suggestedJudgments.filter(j => selectedJudgmentIds.has(j.id)),
+      selected_statutes: suggestedStatutes.filter(s => selectedStatuteIds.has(s.id)),
+      draft_id: params?.id ? parseInt(params.id) : undefined
     };
 
     try {
@@ -447,73 +628,61 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   };
 
   const handleFormat = (command: string) => {
-    // Markdown formatting helper since we are now rendering markdown
-    const selection = window.getSelection()?.toString();
-    if (!selection) return;
-    
-    // We can't use execCommand on Markdown directly easily, 
-    // but in a real app we'd update the draftContent string state.
-    // For now, this is a visual stub for the markdown editor.
+    document.execCommand(command, false, undefined);
   };
 
-  const handleDownloadPDF = async () => {
+  const handleDownloadWord = () => {
     if (!editorRef.current) return;
     
-    // Dynamically import html2pdf to avoid SSR issues
-    const html2pdf = (await import('html2pdf.js')).default;
-    
-    const element = editorRef.current;
-    // CSS margins: [top, right, bottom, left]
-    let pdfMargin = [1, 1, 1.75, 1];
-    if (courtLevel === 'supreme') pdfMargin = [1, 1, 1.75, 2];
-    else if (courtLevel === 'high') pdfMargin = [1, 1, 1.75, 1.5];
+    // Construct footer string
+    const advName = advocateName || "____________________";
+    const advEnroll = advocateEnrollmentNo || "_______________";
+    const footerHtml = `
+      <br/><br/>
+      <table style="width: 100%; border: none; font-family: 'Times New Roman', Times, serif; font-size: 12pt; margin-top: 50px;">
+        <tr>
+          <td style="width: 50%; vertical-align: bottom;">
+            PLACE: ______________<br/>
+            DATED: ______________
+          </td>
+          <td style="width: 50%; text-align: right; vertical-align: bottom;">
+            <b>(${advName.toUpperCase()})</b><br/>
+            Advocate<br/>
+            Enrollment No. ${advEnroll}<br/>
+            Counsel for Petitioner
+          </td>
+        </tr>
+      </table>
+      <br clear="all" style="page-break-before:always" />
+    `;
 
-    const opt = {
-      margin:       pdfMargin,
-      filename:     `Draft_Petition_${new Date().toISOString().split('T')[0]}.pdf`,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 2, useCORS: true },
-      jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' },
-      pagebreak:    { mode: ['css', 'legacy'] }
-    };
-
-    setGenerateStatusText('Generating PDF...');
-    await html2pdf().from(element).set(opt).toPdf().get('pdf').then((pdf: any) => {
-      const totalPages = pdf.internal.getNumberOfPages();
-      for (let i = 1; i <= totalPages; i++) {
-        pdf.setPage(i);
-        
-        // Page Number (Bottom Center)
-        pdf.setFont("times", "normal");
-        pdf.setFontSize(10);
-        pdf.text(
-          `Page ${i} of ${totalPages}`, 
-          pdf.internal.pageSize.getWidth() / 2, 
-          pdf.internal.pageSize.getHeight() - 0.5, 
-          { align: 'center' }
-        );
-
-        // Left Footer
-        pdf.text("PLACE: ______________", 1, pdf.internal.pageSize.getHeight() - 1.0);
-        pdf.text("DATED: ______________", 1, pdf.internal.pageSize.getHeight() - 0.8);
-        
-        // Right Footer
-        const rightX = pdf.internal.pageSize.getWidth() - (courtLevel === 'supreme' ? 1 : 1);
-        const advName = advocateName || "____________________";
-        const advEnroll = advocateEnrollmentNo || "_______________";
-        
-        pdf.setFont("times", "bold");
-        pdf.text(`(${advName.toUpperCase()})`, rightX, pdf.internal.pageSize.getHeight() - 1.4, { align: 'right' });
-        pdf.setFont("times", "normal");
-        pdf.text("Advocate", rightX, pdf.internal.pageSize.getHeight() - 1.2, { align: 'right' });
-        pdf.text(`Enrollment No. ${advEnroll}`, rightX, pdf.internal.pageSize.getHeight() - 1.0, { align: 'right' });
-        pdf.text("Counsel for Petitioner", rightX, pdf.internal.pageSize.getHeight() - 0.8, { align: 'right' });
+    // Extract pages and append footer
+    let finalHtml = "";
+    const pages = editorRef.current.children;
+    for (let i = 0; i < pages.length; i++) {
+      finalHtml += pages[i].innerHTML;
+      if (i < pages.length - 1) {
+         finalHtml += footerHtml;
+      } else {
+         finalHtml += footerHtml.replace('<br clear="all" style="page-break-before:always" />', '');
       }
-    }).save();
-
-    if (generateStatus === 'completed') {
-      setGenerateStatusText('Generation Complete');
     }
+    
+    const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Draft Document</title></head><body>";
+    const footer = "</body></html>";
+    const html = header + finalHtml + footer;
+    const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Draft_Petition_${new Date().toISOString().split('T')[0]}.doc`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleDownloadPDF = () => {
+    window.print();
   };
 
   const addPetitioner = () => setPetitioners([...petitioners, '']);
@@ -563,10 +732,10 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       )}
       <Navbar />
 
-      <main className={`flex-1 flex flex-col ${currentStep === 6 && generateStatus !== 'idle' && generateStatus !== 'loading' ? 'max-w-6xl w-full mx-auto px-4 py-8' : 'max-w-[900px] mx-auto py-12 px-4 md:px-0'}`}>
+      <main className={`flex-1 flex flex-col ${currentStep === 7 && generateStatus !== 'idle' && generateStatus !== 'loading' ? 'max-w-6xl w-full mx-auto px-4 py-8 print:p-0 print:m-0 print:max-w-none print:block' : 'max-w-[900px] mx-auto py-12 px-4 md:px-0'}`}>
         
         {/* Hide header and stepper if we are in the editor view */}
-        {!(currentStep === 6 && generateStatus !== 'loading' && generateStatus !== 'idle') && (
+        {!(currentStep === 7 && generateStatus !== 'loading' && generateStatus !== 'idle') && (
           <>
             {/* Header Section */}
             <div className="text-center mb-10">
@@ -594,7 +763,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         )}
 
         {/* Content Area */}
-        <div className={`animate-fade-slide-up bg-white rounded-2xl shadow-sm border border-outline-variant ${currentStep === 6 && generateStatus !== 'loading' && generateStatus !== 'idle' ? 'flex-1 flex flex-col overflow-hidden' : 'p-8 md:p-10 space-y-6'}`}>
+        <div className={`animate-fade-slide-up print:animate-none print:transform-none bg-white rounded-2xl shadow-sm border border-outline-variant ${currentStep === 7 && generateStatus !== 'loading' && generateStatus !== 'idle' ? 'flex-1 flex flex-col overflow-hidden print:overflow-visible print:border-none print:shadow-none' : 'p-8 md:p-10 space-y-6'}`}>
           
           {currentStep === 1 && (
             <>
@@ -624,18 +793,49 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               </div>
 
               {courtLevel === 'high' && (
-                <div className="mt-6 p-6 border rounded-xl bg-surface-container-lowest animate-fade-slide-up">
-                  <h3 className="font-bold text-on-surface mb-2">Select High Court</h3>
-                  <select 
-                    value={selectedHighCourt}
-                    onChange={(e) => setSelectedHighCourt(e.target.value)}
-                    className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
-                  >
-                    <option value="" disabled>Choose a High Court...</option>
-                    {highCourts.map((court) => (
-                      <option key={court} value={court}>{court}</option>
-                    ))}
-                  </select>
+                <div className="mt-6 p-6 border rounded-xl bg-surface-container-lowest animate-fade-slide-up space-y-4">
+                  <div>
+                    <h3 className="font-bold text-on-surface mb-2">Select High Court</h3>
+                    <select 
+                      value={selectedHighCourt}
+                      onChange={(e) => {
+                        setSelectedHighCourt(e.target.value);
+                        setSelectedHighCourtBench('');
+                      }}
+                      className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                    >
+                      <option value="" disabled>Choose a High Court...</option>
+                      {highCourtsApiData.map((court) => (
+                        <option key={court.id} value={court.name}>{court.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {selectedHighCourt && (
+                    <div className="animate-fade-slide-up">
+                      <h3 className="font-bold text-on-surface mb-2">Select Bench / Seat</h3>
+                      <select 
+                        value={selectedHighCourtBench}
+                        onChange={(e) => setSelectedHighCourtBench(e.target.value)}
+                        className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                      >
+                        <option value="" disabled>Choose a Bench...</option>
+                        {(() => {
+                          const hc = highCourtsApiData.find(c => c.name === selectedHighCourt);
+                          if (!hc) return null;
+                          return (
+                            <>
+                              {hc.benches.map((bench: any) => (
+                                <option key={bench.id} value={bench.name}>
+                                  {bench.name}
+                                </option>
+                              ))}
+                            </>
+                          );
+                        })()}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -779,26 +979,58 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Case Type</h2>
                 <p className="text-primary text-sm font-semibold uppercase tracking-wider">{courtLevel === 'supreme' ? 'Supreme Court of India' : courtLevel === 'high' ? 'High Court' : courtLevel === 'district' ? 'District Court' : selectedSubLevel === 'special_court' ? 'Special Court' : 'Tribunal'}</p>
               </div>
-              <div className="space-y-3">
-                {isLoadingDocTypes ? (
-                  <div className="space-y-3 animate-pulse">
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <div key={n} className="h-14 bg-surface-container-low border border-outline-variant/40 rounded-lg"></div>
-                    ))}
+              <div className="space-y-6">
+                <div>
+                  <h3 className="font-bold text-on-surface mb-2">Category</h3>
+                  {isLoadingCategories ? (
+                    <div className="h-12 bg-surface-container-low border border-outline-variant/40 rounded-lg animate-pulse"></div>
+                  ) : categoriesList.length === 0 ? (
+                    <div className="text-center py-4 text-on-surface-variant text-sm border rounded-lg">No categories available.</div>
+                  ) : (
+                    <select 
+                      className="w-full p-4 rounded-xl border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none bg-white text-on-surface shadow-sm"
+                      value={selectedCategory ? selectedCategory.id : ""}
+                      onChange={(e) => {
+                        const cat = categoriesList.find(c => c.id.toString() === e.target.value);
+                        setSelectedCategory(cat || null);
+                        setSelectedCaseType(null);
+                        setSelectedSubCategory(null);
+                        setDocumentType(cat ? cat.name : ''); 
+                      }}
+                    >
+                      <option value="" disabled>Select a Category...</option>
+                      {categoriesList.map(cat => (
+                        <option key={cat.id} value={cat.id}>{cat.name} {cat.summary ? `- ${cat.summary}` : ''}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {selectedCategory && (
+                  <div className="animate-fade-slide-up">
+                    <h3 className="font-bold text-on-surface mb-2">Subject</h3>
+                    {isLoadingCaseTypes ? (
+                      <div className="h-12 bg-surface-container-low border border-outline-variant/40 rounded-lg animate-pulse"></div>
+                    ) : caseTypesList.length === 0 ? (
+                      <div className="text-center py-4 text-on-surface-variant text-sm border rounded-lg">Proceed to next step.</div>
+                    ) : (
+                      <select 
+                        className="w-full p-4 rounded-xl border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none bg-white text-on-surface shadow-sm"
+                        value={selectedCaseType ? selectedCaseType.id : ""}
+                        onChange={(e) => {
+                          const ct = caseTypesList.find(c => c.id.toString() === e.target.value);
+                          setSelectedCaseType(ct || null);
+                          setSelectedSubCategory(null);
+                          setSubjectMatter(ct ? ct.name : ''); 
+                        }}
+                      >
+                        <option value="" disabled>Select a Subject...</option>
+                        {caseTypesList.map(ct => (
+                          <option key={ct.id} value={ct.id}>{ct.name}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
-                ) : documentTypes.length === 0 ? (
-                  <div className="text-center py-6 text-on-surface-variant text-sm">
-                    No document types available. Please go back and make a selection.
-                  </div>
-                ) : (
-                  documentTypes.map((type) => (
-                    <label key={type} className={`block p-4 border rounded-lg cursor-pointer transition-all duration-200 hover:shadow-sm ${documentType === type ? 'border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(14,107,82,0.1)]' : 'border-outline-variant bg-white hover:border-primary/50'}`}>
-                      <div className="flex items-center gap-4">
-                        <input type="radio" name="document_type" value={type} checked={documentType === type} onChange={() => setDocumentType(type)} className="w-5 h-5 text-primary border-outline-variant focus:ring-primary" />
-                        <span className={`font-medium ${documentType === type ? 'text-primary' : 'text-on-surface'}`}>{type}</span>
-                      </div>
-                    </label>
-                  ))
                 )}
               </div>
             </>
@@ -808,131 +1040,88 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
             <>
               <div className="mb-8">
                 <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Subject Matter</h2>
+                <p className="text-sm text-on-surface-variant mb-4">Select the specific issue that best describes your case</p>
               </div>
               
-              <div className="mb-8">
-                <h3 className="font-bold text-on-surface mb-1">Nature of Dispute</h3>
-                <p className="text-sm text-on-surface-variant mb-4">Select the category that best describes your case — this determines which documents you need</p>
-                
-                {isLoadingSubjectMatters ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {Array(6).fill(0).map((_, i) => (
-                      <div key={i} className="animate-pulse flex p-3 border border-outline-variant rounded-lg bg-surface-container-low h-[46px]"></div>
-                    ))}
+              {(!categoriesList.length || (selectedCategory && selectedCategory.id >= 1000)) ? (
+                <div className="space-y-6 animate-fade-slide-up">
+                  <div>
+                    <label className="block text-sm font-bold text-on-surface mb-1">Subject / Title</label>
+                    {subjectMattersList.length > 0 ? (
+                      <select 
+                        value={subjectMatter}
+                        onChange={(e) => setSubjectMatter(e.target.value)}
+                        className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all text-on-surface bg-white"
+                      >
+                        <option value="" disabled>Select a Subject Matter...</option>
+                        {subjectMattersList
+                          .filter(sm => !documentType || !sm.applicable_doc_types || sm.applicable_doc_types.length === 0 || sm.applicable_doc_types.some((dt: string) => documentType.includes(dt) || dt.includes(documentType)))
+                          .map(sm => (
+                          <option key={sm.matter_name} value={sm.matter_name}>{sm.matter_name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input 
+                        type="text" 
+                        value={subjectMatter}
+                        onChange={(e) => setSubjectMatter(e.target.value)}
+                        placeholder="e.g. Challenging arbitrary termination..."
+                        className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all text-on-surface"
+                      />
+                    )}
                   </div>
-                ) : subjectMattersList.length === 0 ? (
-                  <div className="text-sm text-on-surface-variant p-4 bg-surface-container-low rounded-lg border border-outline-variant">
-                    No subject matters available for this court combination.
+                  <div>
+                    <label className="block text-sm font-bold text-on-surface mb-1">Subject Matter Description</label>
+                    <textarea 
+                      value={caseDescription}
+                      onChange={(e) => setCaseDescription(e.target.value)}
+                      placeholder="e.g. Brief description of the case facts..."
+                      className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[120px] text-on-surface"
+                    />
                   </div>
-                ) : (
-                  (() => {
-                    const filteredMatters = subjectMattersList.filter((matter) => {
-                      if (matter.matter_name === 'Other') return true;
-                      if (!documentType) return true;
-                      if (matter.applicable_doc_types && matter.applicable_doc_types.length > 0) {
-                        return matter.applicable_doc_types.includes(documentType);
-                      }
-                      return true; 
-                    });
-                    
-                    if (!filteredMatters.some(m => m.matter_name === 'Other')) {
-                      filteredMatters.push({ matter_name: 'Other', applicable_doc_types: [] });
-                    }
-
-                    // Group by main matter (split by " — ")
-                    const groupedMatters = filteredMatters.reduce((acc, matter) => {
-                      const parts = matter.matter_name.split(' — ');
-                      const main = parts[0];
-                      const sub = parts[1] || null;
-                      if (!acc[main]) acc[main] = [];
-                      if (sub) {
-                        acc[main].push({ full: matter.matter_name, sub });
-                      } else {
-                        acc[main].push({ full: matter.matter_name, sub: null });
-                      }
-                      return acc;
-                    }, {} as Record<string, {full: string, sub: string | null}[]>);
-
-                    const mainMatterNames = Object.keys(groupedMatters);
-                    const selectedGroup = selectedMainMatter ? groupedMatters[selectedMainMatter] : null;
-                    const hasSubCategories = selectedGroup && selectedGroup.some(item => item.sub !== null);
-
-                    return (
-                      <div className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {mainMatterNames.map((mainName) => {
-                            const isSelected = selectedMainMatter === mainName || (subjectMatter && subjectMatter.startsWith(mainName));
-                            return (
-                              <label key={mainName} className={`block p-3 border rounded-lg cursor-pointer transition-all duration-200 
-                                ${isSelected ? 'border-primary bg-primary/5' : 'border-outline-variant bg-white hover:border-primary/50'}
-                              `}>
-                                <div className="flex items-center gap-3">
-                                  <input 
-                                    type="radio" 
-                                    name="main_matter" 
-                                    value={mainName} 
-                                    checked={isSelected} 
-                                    onChange={() => {
-                                      setSelectedMainMatter(mainName);
-                                      const group = groupedMatters[mainName];
-                                      if (group && !group.some(i => i.sub !== null)) {
-                                        setSubjectMatter(group[0].full);
-                                      } else {
-                                        setSubjectMatter(''); // Need to pick a subcategory
-                                      }
-                                    }} 
-                                    className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" 
-                                  />
-                                  <span className={`text-sm font-medium ${isSelected ? 'text-primary' : 'text-on-surface'}`}>{mainName}</span>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                        
-                        {hasSubCategories && (
-                          <div className="mt-6 pt-6 border-t border-outline-variant animate-in fade-in slide-in-from-top-2">
-                            <h3 className="font-bold text-on-surface mb-3 flex items-center gap-2">
-                              <span className="material-symbols-outlined text-primary text-sm">subdirectory_arrow_right</span>
-                              Select Specific Issue
-                            </h3>
-                            <div className="grid grid-cols-1 gap-2 pl-4">
-                              {selectedGroup.map((item) => (
-                                <label key={item.full} className={`block p-3 border rounded-lg cursor-pointer transition-all duration-200 
-                                  ${subjectMatter === item.full ? 'border-primary bg-primary/5 shadow-[0_0_0_1px_rgba(14,107,82,0.1)]' : 'border-outline-variant bg-surface-container-lowest hover:border-primary/50'}
-                                `}>
-                                  <div className="flex items-center gap-3">
-                                    <input 
-                                      type="radio" 
-                                      name="sub_matter" 
-                                      value={item.full} 
-                                      checked={subjectMatter === item.full} 
-                                      onChange={() => setSubjectMatter(item.full)} 
-                                      className="w-4 h-4 text-primary border-outline-variant focus:ring-primary" 
-                                    />
-                                    <span className={`text-sm ${subjectMatter === item.full ? 'font-bold text-primary' : 'font-medium text-on-surface'}`}>{item.sub}</span>
-                                  </div>
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()
-                )}
-              </div>
-
-              <div>
-                <h3 className="font-bold text-on-surface mb-1">Brief Description of the Case</h3>
-                <p className="text-sm text-on-surface-variant mb-4">Describe what happened and what relief you are seeking</p>
-                <textarea 
-                  value={caseDescription}
-                  onChange={(e) => setCaseDescription(e.target.value)}
-                  placeholder="e.g. The petitioner is the recorded owner of Plot No. 45, Village Rampur. The respondent has illegally occupied the land since January 2023..." 
-                  className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all resize-y min-h-[200px]" 
-                />
-              </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {isLoadingSubCategories ? (
+                    <div className="space-y-3 animate-pulse">
+                      {[1, 2, 3].map((n) => (
+                        <div key={n} className="h-14 bg-surface-container-low border border-outline-variant/40 rounded-lg"></div>
+                      ))}
+                    </div>
+                  ) : subCategoriesList.length === 0 ? (
+                    <div className="text-center py-6 text-on-surface-variant text-sm bg-surface-container-low rounded-lg border border-outline-variant">
+                      No specific subcategories available for this subject. You can proceed.
+                    </div>
+                  ) : (
+                    <select
+                      value={selectedSubCategory ? selectedSubCategory.id : ""}
+                      onChange={(e) => {
+                        const sub = subCategoriesList.find(s => s.id.toString() === e.target.value);
+                        if (sub) {
+                          setSelectedSubCategory(sub);
+                          setSubjectMatter(`${selectedCaseType?.name} — ${sub.name}`); 
+                        }
+                      }}
+                      className="w-full p-4 rounded-xl border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none bg-white text-on-surface shadow-sm"
+                    >
+                      <option value="" disabled>Select a Specific Issue...</option>
+                      {subCategoriesList.map((sub) => (
+                        <option key={sub.id} value={sub.id}>{sub.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  
+                  <div className="mt-6 animate-fade-slide-up">
+                    <label className="block text-sm font-bold text-on-surface mb-1">Subject Matter Description <span className="text-on-surface-variant font-normal">(Optional)</span></label>
+                    <textarea 
+                      value={caseDescription}
+                      onChange={(e) => setCaseDescription(e.target.value)}
+                      placeholder="e.g. Brief description of the case facts..."
+                      className="w-full p-4 rounded-xl border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[120px] text-on-surface shadow-sm bg-white"
+                    />
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -1116,19 +1305,19 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 <div>
                   <label className="block text-sm font-bold text-on-surface mb-1">Facts of the Case</label>
                   <p className="text-xs text-on-surface-variant mb-2">Chronological facts with dates. Leave blank and AI will draft based on your description.</p>
-                  <textarea placeholder="1. That the petitioner is the recorded owner of... 2. That on [date], the respondent..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[100px]" />
+                  <textarea value={factsOfCase} onChange={(e) => setFactsOfCase(e.target.value)} placeholder="1. That the petitioner is the recorded owner of... 2. That on [date], the respondent..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[100px]" />
                 </div>
 
                 <div>
                   <label className="block text-sm font-bold text-on-surface mb-1">Grounds</label>
                   <p className="text-xs text-on-surface-variant mb-2">Legal grounds to be raised. Leave blank and AI will draft appropriate grounds.</p>
-                  <textarea placeholder="A. That the impugned order is without jurisdiction... B. That the respondent has violated..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[100px]" />
+                  <textarea value={grounds} onChange={(e) => setGrounds(e.target.value)} placeholder="A. That the impugned order is without jurisdiction... B. That the respondent has violated..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[100px]" />
                 </div>
 
                 <div>
                   <label className="block text-sm font-bold text-on-surface mb-1">Relief Sought</label>
                   <p className="text-xs text-on-surface-variant mb-2">What you want the court to order. Leave blank for AI to draft.</p>
-                  <textarea placeholder="i. Issue a writ of mandamus directing... ii. Stay the operation of..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
+                  <textarea value={reliefSought} onChange={(e) => setReliefSought(e.target.value)} placeholder="i. Issue a writ of mandamus directing... ii. Stay the operation of..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
                 </div>
 
                 <div>
@@ -1155,7 +1344,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 <div className="grid grid-cols-[150px_1fr] gap-y-2 text-sm">
                   <span className="text-on-surface-variant">Court:</span>
                   <span className="font-medium text-on-surface capitalize">
-                    {courtLevel === 'high' && selectedHighCourt ? selectedHighCourt : 
+                    {courtLevel === 'high' && selectedHighCourt ? `${selectedHighCourt}${selectedHighCourtBench ? ` - ${selectedHighCourtBench}` : ''}` : 
                      courtLevel === 'district' && selectedDistrictCourt ? `${selectedDistrictCourt}, ${selectedState}` : 
                      courtLevel === 'tribunal' && selectedSubLevel === 'tribunal' && selectedTribunal ? selectedTribunal :
                      courtLevel === 'tribunal' && selectedSubLevel === 'special_court' && selectedSpecialCourt ? selectedSpecialCourt :
@@ -1172,7 +1361,102 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
             </>
           )}
 
-          {currentStep === 6 && generateStatus === 'loading' && (
+          {currentStep === 6 && (
+            <>
+              <div className="mb-6">
+                <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Citations</h2>
+                <p className="text-on-surface-variant text-sm">Review and select the legal precedents and statutes you want to cite in your draft.</p>
+              </div>
+
+              {isLoadingCitations ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin mb-4"></div>
+                  <p className="font-bold text-on-surface">Searching for Relevant Case Laws...</p>
+                  <p className="text-sm text-on-surface-variant mt-2">Analyzing facts and extracting relevant sections.</p>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {/* Statutes Section */}
+                  <div>
+                    <h3 className="font-bold text-on-surface mb-4 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-primary">local_library</span>
+                      Relevant Statutes & Codes
+                    </h3>
+                    
+                    {suggestedStatutes.length === 0 ? (
+                      <p className="text-sm text-on-surface-variant italic">No relevant statutes found for this case.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {suggestedStatutes.map((statute) => (
+                          <label key={statute.id} className={`flex items-start gap-4 p-4 border rounded-xl cursor-pointer transition-all ${selectedStatuteIds.has(statute.id) ? 'border-primary bg-primary/5' : 'border-outline-variant hover:border-primary/30'}`}>
+                            <input 
+                              type="checkbox" 
+                              className="mt-1 w-4 h-4 text-primary rounded border-outline focus:ring-primary"
+                              checked={selectedStatuteIds.has(statute.id)}
+                              onChange={(e) => {
+                                const newSet = new Set(selectedStatuteIds);
+                                if (e.target.checked) newSet.add(statute.id);
+                                else newSet.delete(statute.id);
+                                setSelectedStatuteIds(newSet);
+                              }}
+                            />
+                            <div>
+                              <h4 className="font-bold text-on-surface">{statute.title}</h4>
+                              <p className="text-xs text-on-surface-variant mt-1 line-clamp-2">{statute.text}</p>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Judgments Section */}
+                  <div>
+                    <h3 className="font-bold text-on-surface mb-4 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-primary">gavel</span>
+                      Precedents & Case Laws
+                    </h3>
+                    
+                    {suggestedJudgments.length === 0 ? (
+                      <p className="text-sm text-on-surface-variant italic">No relevant precedents found for this case.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {suggestedJudgments.map((judgment) => (
+                          <label key={judgment.id} className={`flex items-start gap-4 p-4 border rounded-xl cursor-pointer transition-all ${selectedJudgmentIds.has(judgment.id) ? 'border-primary bg-primary/5' : 'border-outline-variant hover:border-primary/30'}`}>
+                            <input 
+                              type="checkbox" 
+                              className="mt-1 w-4 h-4 text-primary rounded border-outline focus:ring-primary"
+                              checked={selectedJudgmentIds.has(judgment.id)}
+                              onChange={(e) => {
+                                const newSet = new Set(selectedJudgmentIds);
+                                if (e.target.checked) newSet.add(judgment.id);
+                                else newSet.delete(judgment.id);
+                                setSelectedJudgmentIds(newSet);
+                              }}
+                            />
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h4 className="font-bold text-on-surface">{judgment.title}</h4>
+                                {judgment.case_number && (
+                                  <span className="text-xs bg-surface-container-high px-2 py-0.5 rounded font-mono">{judgment.case_number}</span>
+                                )}
+                                {judgment.year && (
+                                  <span className="text-xs text-on-surface-variant">({judgment.year})</span>
+                                )}
+                              </div>
+                              <p className="text-xs text-on-surface-variant mt-1 line-clamp-3">{judgment.text}</p>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {currentStep === 7 && generateStatus === 'loading' && (
             <div className="text-center py-20 flex-1 flex flex-col items-center justify-center">
               <div className="w-20 h-20 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-6">
                 <span className="material-symbols-outlined text-primary text-4xl animate-pulse">magic_button</span>
@@ -1191,28 +1475,28 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
             </div>
           )}
 
-          {currentStep === 6 && (generateStatus === 'streaming' || generateStatus === 'completed') && (
+          {currentStep === 7 && (generateStatus === 'streaming' || generateStatus === 'completed') && (
             <div className="flex-1 flex flex-col h-full bg-surface-container-lowest animate-fade-slide-up">
               {/* Toolbar */}
-              <div className="flex items-center justify-between p-4 border-b border-outline-variant bg-white">
+              <div className="flex items-center justify-between p-4 border-b border-outline-variant bg-white print:hidden">
                 <div className="flex items-center gap-2">
-                  <button onClick={() => handleFormat('bold')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Bold">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('bold')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Bold">
                     <span className="material-symbols-outlined text-lg">format_bold</span>
                   </button>
-                  <button onClick={() => handleFormat('italic')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Italic">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('italic')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Italic">
                     <span className="material-symbols-outlined text-lg">format_italic</span>
                   </button>
-                  <button onClick={() => handleFormat('underline')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Underline">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('underline')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors" title="Underline">
                     <span className="material-symbols-outlined text-lg">format_underlined</span>
                   </button>
                   <div className="w-px h-6 bg-outline-variant mx-1"></div>
-                  <button onClick={() => handleFormat('justifyLeft')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('justifyLeft')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
                     <span className="material-symbols-outlined text-lg">format_align_left</span>
                   </button>
-                  <button onClick={() => handleFormat('justifyCenter')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('justifyCenter')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
                     <span className="material-symbols-outlined text-lg">format_align_center</span>
                   </button>
-                  <button onClick={() => handleFormat('justifyFull')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('justifyFull')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
                     <span className="material-symbols-outlined text-lg">format_align_justify</span>
                   </button>
                 </div>
@@ -1221,9 +1505,19 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   <span className={`text-xs font-bold px-3 py-1 rounded-full ${generateStatus === 'completed' ? 'bg-[#004131]/10 text-[#004131]' : 'bg-primary text-white animate-pulse'}`}>
                     {generateStatusText}
                   </span>
-                  <button onClick={() => setIsEditingMode(!isEditingMode)} className={`flex items-center gap-2 px-3 py-1.5 text-sm font-bold rounded transition-colors ${isEditingMode ? 'bg-primary text-white' : 'bg-surface-container-low text-on-surface hover:bg-surface-container'}`}>
+                  <button onClick={() => {
+                      if (!isEditingMode && !hasEdited) {
+                          setHtmlPages(pageRefs.current.map(r => r?.innerHTML || ''));
+                          setHasEdited(true);
+                      }
+                      setIsEditingMode(!isEditingMode);
+                  }} className={`flex items-center gap-2 px-3 py-1.5 text-sm font-bold rounded transition-colors ${isEditingMode ? 'bg-primary text-white' : 'bg-surface-container-low text-on-surface hover:bg-surface-container'}`}>
                     <span className="material-symbols-outlined text-[16px]">{isEditingMode ? 'visibility' : 'edit'}</span>
                     {isEditingMode ? 'Preview Mode' : 'Edit Text'}
+                  </button>
+                  <button onClick={handleDownloadWord} className="flex items-center gap-2 px-4 py-1.5 bg-[#2b579a] text-white text-sm font-bold rounded hover:bg-[#1a3a6c] transition-colors">
+                    <span className="material-symbols-outlined text-[16px]">description</span>
+                    Word
                   </button>
                   <button onClick={handleDownloadPDF} className="flex items-center gap-2 px-4 py-1.5 bg-primary text-white text-sm font-bold rounded hover:bg-[#004131] transition-colors">
                     <span className="material-symbols-outlined text-[16px]">download</span>
@@ -1233,62 +1527,135 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               </div>
 
               {/* Editor Workspace */}
-              <div className="flex-1 overflow-y-auto bg-surface-container-lowest p-8 md:p-12 print:p-0 print:bg-white">
-                <div 
-                  className="max-w-[850px] mx-auto bg-white shadow-xl min-h-[1123px] border border-outline-variant print:shadow-none print:border-none print:m-0 print:max-w-none"
-                  style={{ 
-                    boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
-                    paddingTop: '1in',
-                    paddingRight: '1in',
-                    paddingBottom: '1in',
-                    paddingLeft: courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in'
-                  }}
-                >
-                  <div 
-                    ref={editorRef}
-                    className="text-on-surface outline-none prose prose-slate max-w-none"
-                    style={{ 
-                      fontFamily: '"Times New Roman", Times, serif', 
-                      fontSize: courtLevel === 'supreme' || courtLevel === 'high' ? '14pt' : '12pt',
-                      lineHeight: '1.5'
-                    }}
-                  >
-                    {isEditingMode ? (
-                      <textarea
-                        value={draftContent}
-                        onChange={(e) => setDraftContent(e.target.value)}
-                        className="w-full h-full min-h-[1000px] bg-transparent resize-none outline-none font-mono"
-                        style={{ fontSize: '11pt', lineHeight: '1.6' }}
-                        spellCheck={false}
-                      />
-                    ) : (
-                      <ReactMarkdown 
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw]}
-                        components={{
-                          hr: ({node, ...props}) => <hr className="border-0 border-b border-dashed border-outline-variant w-full print:border-transparent print:m-0" style={{ margin: '2rem 0', pageBreakAfter: 'always', breakAfter: 'page' }} {...props} />,
-                          table: ({node, ...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
-                          th: ({node, ...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
-                          td: ({node, ...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
-                          h1: ({node, ...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '16pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                          h2: ({node, ...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                          h3: ({node, ...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                          p: ({node, ...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
-                          ul: ({node, ...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                          ol: ({node, ...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                          li: ({node, ...props}) => <li style={{ margin: '0.3rem 0', lineHeight: '1.5', textAlign: 'justify' }} {...props} />
-                        }}
-                      >
-                        {draftContent}
-                      </ReactMarkdown>
-                    )}
-                  </div>
-                </div>
+              <div className="flex-1 overflow-y-auto bg-surface-container-highest p-8 md:p-12 print:p-0 print:bg-white print:overflow-visible print:block">
+                
+                {/* Dynamically Inject Print Styling to Override Inline Padding & Configure Page Margins */}
+                <style type="text/css" media="print">
+                  {`
+                    @page {
+                      size: A4;
+                      margin-top: 1in;
+                      margin-bottom: 0.5in;
+                      margin-right: 1in;
+                      margin-left: ${courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in'};
+                    }
+                    .html2pdf__page-break {
+                      padding: 0 !important;
+                      margin: 0 !important;
+                      box-shadow: none !important;
+                      border: none !important;
+                      background: transparent !important;
+                      min-height: 0 !important;
+                      height: auto !important;
+                    }
+                    .print-table { display: table !important; }
+                    .print-tfoot { display: table-footer-group !important; }
+                    .print-tbody { display: table-row-group !important; }
+                    .print-td { display: table-cell !important; }
+                  `}
+                </style>
+
+                <table className="w-full block print-table">
+                  <tfoot className="hidden print-tfoot">
+                    <tr>
+                      <td className="border-none pt-4 pb-2">
+                        <table style={{ width: '100%', border: 'none', fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt' }}>
+                          <tbody>
+                            <tr>
+                              <td style={{ width: '50%', verticalAlign: 'bottom', border: 'none' }}>
+                                PLACE: ______________<br/>
+                                DATED: ______________
+                              </td>
+                              <td style={{ width: '50%', textAlign: 'right', verticalAlign: 'bottom', border: 'none' }}>
+                                <b>({(advocateName || "____________________").toUpperCase()})</b><br/>
+                                Advocate<br/>
+                                Enrollment No. {advocateEnrollmentNo || "_______________"}<br/>
+                                Counsel for Petitioner
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  </tfoot>
+                  <tbody className="block print-tbody">
+                    <tr>
+                      <td className="block print-td border-none p-0">
+                        <div ref={editorRef} className="print:bg-white">
+                          {draftContent.split(/<<SECTION:\w+>>|<<END_SECTION>>/).map(content => content.trim()).filter(content => content.length > 0).map((pageContent, index) => (
+                            <div 
+                              key={index}
+                              className="html2pdf__page-break max-w-[850px] mx-auto bg-white shadow-xl min-h-[1123px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
+                              style={{ 
+                                boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
+                                paddingTop: '1in',
+                                paddingRight: '1in',
+                                paddingBottom: '1in',
+                                paddingLeft: courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in',
+                                position: 'relative'
+                              }}
+                            >
+                              {!isEditingMode && !hasEdited ? (
+                                <div 
+                                  ref={el => { pageRefs.current[index] = el; }}
+                                  className="text-on-surface outline-none prose prose-slate max-w-none"
+                                  style={{ 
+                                    fontFamily: '"Times New Roman", Times, serif', 
+                                    fontSize: '12pt',
+                                    lineHeight: '1.5'
+                                  }}
+                                >
+                                  <ReactMarkdown 
+                                    remarkPlugins={[remarkGfm]}
+                                    rehypePlugins={[rehypeRaw]}
+                                    components={{
+                                      hr: ({...props}) => <hr className="border-0 border-b border-dashed border-outline-variant w-full print:border-transparent print:m-0" style={{ margin: '2rem 0' }} {...props} />,
+                                      table: ({...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
+                                      th: ({...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
+                                      td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
+                                      h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '16pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                      h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                      h3: ({...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                      p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
+                                      ul: ({...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
+                                      ol: ({...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
+                                      li: ({...props}) => <li style={{ margin: '0.3rem 0', lineHeight: '1.5', textAlign: 'justify' }} {...props} />
+                                    }}
+                                  >
+                                    {pageContent}
+                                  </ReactMarkdown>
+                                </div>
+                              ) : (
+                                <div
+                                  contentEditable={isEditingMode}
+                                  className={`text-on-surface outline-none prose prose-slate max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
+                                  style={{ 
+                                    fontFamily: '"Times New Roman", Times, serif', 
+                                    fontSize: '12pt',
+                                    lineHeight: '1.5',
+                                    minHeight: '100%'
+                                  }}
+                                  dangerouslySetInnerHTML={{ __html: hasEdited ? htmlPages[index] : (pageRefs.current[index]?.innerHTML || '') }}
+                                  onInput={(e) => {
+                                    if (!hasEdited) setHasEdited(true);
+                                    const newHtml = [...(hasEdited ? htmlPages : pageRefs.current.map(r => r?.innerHTML || ''))];
+                                    newHtml[index] = e.currentTarget.innerHTML;
+                                    setHtmlPages(newHtml);
+                                  }}
+                                />
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
               {/* Citation Verification Panel */}
               {citations.length > 0 && (
-                <div className="border-t border-outline-variant bg-surface-container-lowest px-8 py-5">
+                <div className="border-t border-outline-variant bg-surface-container-lowest px-8 py-5 print:hidden">
                   <h4 className="font-bold text-sm tracking-wider uppercase mb-3 text-on-surface flex items-center gap-2">
                     <span className="material-symbols-outlined text-base text-primary">fact_check</span>
                     Citation Verification
@@ -1318,8 +1685,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         </div>
 
         {/* Sticky Bottom Action Bar (Hidden during editor view) */}
-        {!(currentStep === 6 && generateStatus !== 'loading' && generateStatus !== 'idle') && (
-          <div className="mt-8 flex justify-between items-center">
+        {!(currentStep === 7 && generateStatus !== 'loading' && generateStatus !== 'idle') && (
+          <div className="mt-8 flex justify-between items-center print:hidden">
             <button 
               onClick={handleBack}
               disabled={currentStep === 1}
@@ -1328,25 +1695,27 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               Back
             </button>
             
-            {currentStep < 6 ? (
+            {currentStep < 7 ? (
               <button 
                 onClick={handleNext}
                 disabled={
-                  (currentStep === 1 && courtLevel === 'high' && !selectedHighCourt) ||
+                  (currentStep === 1 && courtLevel === 'high' && (!selectedHighCourt || !selectedHighCourtBench)) ||
                   (currentStep === 1 && courtLevel === 'district' && (!selectedState || !selectedDistrictCourt)) ||
                   (currentStep === 1 && courtLevel === 'tribunal' && (
                     !selectedSubLevel ||
                     (selectedSubLevel === 'tribunal' && !selectedTribunal) ||
                     (selectedSubLevel === 'special_court' && !selectedSpecialCourt)
                   )) ||
-                  (currentStep === 3 && (
-                    !subjectMatter ||
-                    !caseDescription.trim()
-                  ))
+                  (currentStep === 2 && !documentType) ||
+                  (currentStep === 3 && !subjectMatter) ||
+                  isLoadingDocs || isLoadingCitations
                 }
                 className="flex items-center gap-2 bg-primary text-white px-8 py-3 rounded-lg font-bold shadow-md hover:-translate-y-0.5 hover:shadow-lg hover:bg-[#004131] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 transition-all duration-300">
-                Next
-                <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                {currentStep === 6 ? (
+                  <>Generate Draft <span className="material-symbols-outlined text-[18px]">auto_awesome</span></>
+                ) : (
+                  <>Next <span className="material-symbols-outlined text-sm">arrow_forward</span></>
+                )}
               </button>
             ) : (
               <div /> // Editor has its own controls

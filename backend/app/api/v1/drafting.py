@@ -68,6 +68,8 @@ class GenerateRequest(BaseModel):
     respondents: list = []
     jurisdiction_basis: str = ""
     impugned_order_date: Optional[str] = None
+    selected_judgments: Optional[list] = None
+    selected_statutes: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +84,7 @@ async def _rag_stream(req: GenerateRequest):
     """
     form_data = req.dict()
 
-    # ── Stage 1: Query Rewriting ─────────────────────────────────────────
-    # Fetch OCR text from uploaded_docs to include in the context
+    # ── Stage 1: Query Rewriting & OCR Text Fetching ─────────────────────────────────────────
     ocr_texts = []
     try:
         async with engine.connect() as conn:
@@ -100,40 +101,45 @@ async def _rag_stream(req: GenerateRequest):
 
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
 
-    combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
-    yield "event: status\ndata: Rewriting queries...\n\n"
+    if req.selected_judgments is not None and req.selected_statutes is not None:
+        # User has pre-selected the citations in Phase 6, bypass Stage 1-4
+        top_judgments = req.selected_judgments
+        top_statutes = req.selected_statutes
+    else:
+        # Fallback to full RAG retrieval if not provided (old behavior)
+        combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
+        yield "event: status\ndata: Rewriting queries...\n\n"
 
-    queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter)
-    combined_query = " ".join(queries[:3])
+        queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter)
+        combined_query = " ".join(queries[:3])
 
-    # ── Stages 2 & 3: Fan-out Hybrid Retrieval (3 corpora in parallel) ──
-    yield "event: status\ndata: Retrieving relevant precedents and statutes...\n\n"
+        # ── Stages 2 & 3: Fan-out Hybrid Retrieval (3 corpora in parallel) ──
+        yield "event: status\ndata: Retrieving relevant precedents and statutes...\n\n"
 
-    try:
-        embedding_fn = await _get_embedding_fn()
-        judgment_task = retrieve_judgment_chunks(engine, queries, embedding_fn)
-        statute_task  = retrieve_statutes(engine, queries, embedding_fn)
-        coi_task      = retrieve_statutes(engine, queries, embedding_fn, coi_only=True)
+        try:
+            embedding_fn = await _get_embedding_fn()
+            judgment_task = retrieve_judgment_chunks(engine, queries, embedding_fn)
+            statute_task  = retrieve_statutes(engine, queries, embedding_fn)
+            coi_task      = retrieve_statutes(engine, queries, embedding_fn, coi_only=True)
 
-        judgment_results, statute_results, coi_results = await asyncio.gather(
-            judgment_task, statute_task, coi_task
-        )
-        # Merge statutes + COI (deduplicate by id)
-        seen_ids = set()
-        merged_statutes = []
-        for item in statute_results + coi_results:
-            if item["id"] not in seen_ids:
-                merged_statutes.append(item)
-                seen_ids.add(item["id"])
-    except Exception as e:
-        print(f"Retrieval error: {e}")
-        judgment_results, merged_statutes = [], []
+            judgment_results, statute_results, coi_results = await asyncio.gather(
+                judgment_task, statute_task, coi_task
+            )
+            # Merge statutes + COI (deduplicate by id)
+            seen_ids = set()
+            merged_statutes = []
+            for item in statute_results + coi_results:
+                if item["id"] not in seen_ids:
+                    merged_statutes.append(item)
+                    seen_ids.add(item["id"])
+        except Exception as e:
+            print(f"Retrieval error: {e}")
+            judgment_results, merged_statutes = [], []
 
-    # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
-    yield "event: status\ndata: Reranking results...\n\n"
-    all_candidates = judgment_results[:25] + merged_statutes[:25]
-    top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=5)
-    top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=5)
+        # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
+        yield "event: status\ndata: Reranking results...\n\n"
+        top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=5)
+        top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=5)
 
     # ── Stage 5: Context Assembly ────────────────────────────────────────
     prompt = assemble_prompt(form_data, top_judgments, top_statutes, uploaded_docs_context)
@@ -146,7 +152,7 @@ async def _rag_stream(req: GenerateRequest):
 
     try:
         stream = await client.chat.completions.create(
-            model="openai/gpt-4o",
+            model="anthropic/claude-sonnet-4",
             messages=[{"role": "user", "content": prompt}],
             stream=True,
             temperature=0.2,
@@ -188,3 +194,56 @@ async def generate_draft(req: GenerateRequest):
             "X-Accel-Buffering": "no",
         }
     )
+
+@router.post("/suggest-citations")
+async def suggest_citations(req: GenerateRequest):
+    ocr_texts = []
+    try:
+        async with engine.connect() as conn:
+            from sqlalchemy import text
+            res = await conn.execute(
+                text("SELECT ocr_text FROM uploaded_docs WHERE draft_id = :d AND ocr_text IS NOT NULL"),
+                {"d": req.draft_id}
+            )
+            for row in res:
+                if len(row[0]) > 50:
+                    ocr_texts.append(row[0])
+    except Exception as e:
+        print(f"Error fetching OCR text: {e}")
+
+    uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
+    combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
+    
+    queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter)
+    combined_query = " ".join(queries[:3])
+
+    try:
+        embedding_fn = await _get_embedding_fn()
+        judgment_task = retrieve_judgment_chunks(engine, queries, embedding_fn)
+        statute_task  = retrieve_statutes(engine, queries, embedding_fn)
+        coi_task      = retrieve_statutes(engine, queries, embedding_fn, coi_only=True)
+
+        judgment_results, statute_results, coi_results = await asyncio.gather(
+            judgment_task, statute_task, coi_task
+        )
+        seen_ids = set()
+        merged_statutes = []
+        for item in statute_results + coi_results:
+            if item["id"] not in seen_ids:
+                merged_statutes.append(item)
+                seen_ids.add(item["id"])
+    except Exception as e:
+        print(f"Retrieval error: {e}")
+        judgment_results, merged_statutes = [], []
+        
+    print(f"DEBUG - Queries: {queries}")
+    print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
+    print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
+
+    top_judgments  = await rerank_candidates(combined_query, judgment_results[:10], top_k=5)
+    top_statutes   = await rerank_candidates(combined_query, merged_statutes[:10], top_k=5)
+    
+    return {
+        "judgments": top_judgments,
+        "statutes": top_statutes
+    }

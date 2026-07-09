@@ -252,3 +252,59 @@ async def search_precedents(
             status_code=500,
             detail=f"Search failed: {exc}",
         ) from exc
+
+
+from fastapi import BackgroundTasks
+def _do_embed_batch(model, texts):
+    return model.encode(texts).tolist()
+
+async def _embed_statutes_task():
+    model = await get_model()
+    from app.core.database import engine
+    from sqlalchemy import text
+    import concurrent.futures
+    import asyncio
+    
+    with open("embed_log.txt", "a") as f:
+        f.write("Starting background statute embedding...\n")
+        f.flush()
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            async with engine.begin() as conn:
+                res = await conn.execute(text("SELECT id, section_text, title FROM legal_code_sections WHERE embedding IS NULL"))
+                rows = res.fetchall()
+            
+            if not rows:
+                with open("embed_log.txt", "a") as f:
+                    f.write("All statutes already embedded.\n")
+                return
+                
+            batch_size = 50
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i:i+batch_size]
+                texts = [f"{r.title or ''}. {r.section_text or ''}" for r in batch]
+                
+                # Run the blocking PyTorch encode in a thread pool so we don't hang the server!
+                vectors = await loop.run_in_executor(pool, _do_embed_batch, model, texts)
+                
+                async with engine.begin() as conn:
+                    for idx, r in enumerate(batch):
+                        await conn.execute(
+                            text("UPDATE legal_code_sections SET embedding = :emb WHERE id = :id"),
+                            {"emb": str(vectors[idx]), "id": r.id}
+                        )
+                with open("embed_log.txt", "a") as f:
+                    f.write(f"Embedded batch {i//batch_size + 1} / {(len(rows) + batch_size - 1) // batch_size}\n")
+                    f.flush()
+            with open("embed_log.txt", "a") as f:
+                f.write("Done embedding all statutes!\n")
+        except Exception as e:
+            with open("embed_log.txt", "a") as f:
+                import traceback
+                f.write(f"Embedding failed: {e}\n{traceback.format_exc()}\n")
+
+@router.post("/trigger-statute-embedding")
+async def trigger_embedding(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_embed_statutes_task)
+    return {"status": "started background task"}

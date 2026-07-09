@@ -3,8 +3,9 @@ import Link from "next/link";
 
 export default function Navbar() {
   return (
-    <header className="sticky top-0 z-50 flex justify-between items-center w-full px-margin-desktop py-4 bg-surface-container-lowest border-b border-outline-variant">
+    <header className="sticky top-0 z-50 flex justify-between items-center w-full px-margin-desktop py-4 bg-surface-container-lowest border-b border-outline-variant print:hidden">
       <div className="flex items-center gap-8">
+
         {/* Replace with actual logo later */}
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-primary text-3xl">gavel</span>
