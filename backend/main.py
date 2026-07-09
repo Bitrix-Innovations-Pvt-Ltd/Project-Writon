@@ -12,6 +12,7 @@ from app.api.v1 import (
     uploads as uploads_v1,
     drafting as drafting_v1,
     translate as translate_v1,
+    parties as parties_v1,
 )
 
 app = FastAPI(title="WritOnline API")
@@ -33,6 +34,7 @@ app.include_router(analytics_v1.router, prefix="/api/v1")
 app.include_router(uploads_v1.router, prefix="/api/v1")
 app.include_router(drafting_v1.router, prefix="/api/v1")
 app.include_router(translate_v1.router, prefix="/api/v1")
+app.include_router(parties_v1.router, prefix="/api/v1")
 
 
 @app.on_event("startup")

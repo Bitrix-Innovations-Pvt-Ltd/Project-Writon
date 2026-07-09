@@ -6,6 +6,7 @@ Follows the same SSE streaming pattern used in drafting.py.
 Supports images (jpg/png) and PDFs (converted to images via PyMuPDF).
 Auto-detects document language; if already English, no translation needed.
 Includes a PDF export endpoint for the translated text.
+Includes a voice recording -> transcription -> translation endpoint.
 """
 
 import json
@@ -31,6 +32,9 @@ FALLBACK_MODEL = "google/gemini-3-flash-preview"
 MAX_PDF_PAGES = 15
 PDF_DPI = 150
 
+WHISPER_MODEL = "openai/whisper-large-v3-turbo"
+TRANSLATE_MODEL = "openai/gpt-4o-mini"
+
 OCR_TRANSLATE_PROMPT = """You are a legal document OCR and translation assistant.
 Given the image(s) of a legal document, do the following in one response:
 
@@ -43,6 +47,14 @@ Given the image(s) of a legal document, do the following in one response:
 
 Respond ONLY with valid JSON in this exact shape:
 {"detected_language": "...", "original_transcription": "...", "english_translation": "..."}
+"""
+
+VOICE_TRANSLATE_PROMPT = """Translate the following Hindi legal text into clear, accurate English.
+Preserve all names, dates, IPC/BNS/CrPC/BNSS section references, and case numbers exactly as given.
+Return only the translated English text, nothing else.
+
+Text to translate:
+{text}
 """
 
 
@@ -164,6 +176,44 @@ async def process_document(file: UploadFile = File(...)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Voice: record Hindi speech -> Whisper transcription -> GPT-4o-mini translation
+# ---------------------------------------------------------------------------
+async def _whisper_transcribe(audio_bytes: bytes, filename: str) -> str:
+    client = get_openrouter_client()
+    response = await client.audio.transcriptions.create(
+        model=WHISPER_MODEL,
+        file=(filename, audio_bytes, "audio/webm"),
+    )
+    return response.text
+
+
+async def _gpt_translate(hindi_text: str) -> str:
+    client = get_openrouter_client()
+    response = await client.chat.completions.create(
+        model=TRANSLATE_MODEL,
+        messages=[{"role": "user", "content": VOICE_TRANSLATE_PROMPT.format(text=hindi_text)}],
+        temperature=0.1,
+    )
+    return response.choices[0].message.content.strip()
+
+
+@router.post("/voice-to-english")
+async def voice_to_english(file: UploadFile = File(...)):
+    audio_bytes = await file.read()
+
+    try:
+        hindi_text = await _whisper_transcribe(audio_bytes, file.filename or "recording.webm")
+        english_text = await _gpt_translate(hindi_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice processing failed: {str(e)}")
+
+    return {
+        "hindi_text": hindi_text,
+        "english_text": english_text,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+
+const API_BASE = "http://127.0.0.1:8000/api/v1/translate";
 
 export default function TranslatePage() {
+    // ---------------------------------------------------------------------
+    // Document OCR + translation state
+    // ---------------------------------------------------------------------
     const [file, setFile] = useState<File | null>(null);
     const [log, setLog] = useState<string[]>([]);
     const [language, setLanguage] = useState("");
@@ -10,6 +15,17 @@ export default function TranslatePage() {
     const [translation, setTranslation] = useState("");
     const [loading, setLoading] = useState(false);
     const [downloading, setDownloading] = useState(false);
+
+    // ---------------------------------------------------------------------
+    // Voice recording + transcription/translation state
+    // ---------------------------------------------------------------------
+    const [isRecording, setIsRecording] = useState(false);
+    const [voiceLoading, setVoiceLoading] = useState(false);
+    const [voiceError, setVoiceError] = useState("");
+    const [hindiText, setHindiText] = useState("");
+    const [englishText, setEnglishText] = useState("");
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
 
     const handleSubmit = async () => {
         if (!file) return;
@@ -22,7 +38,7 @@ export default function TranslatePage() {
         const formData = new FormData();
         formData.append("file", file);
 
-        const response = await fetch("http://127.0.0.1:8000/api/v1/translate/process", {
+        const response = await fetch(`${API_BASE}/process`, {
             method: "POST",
             body: formData,
         });
@@ -74,7 +90,7 @@ export default function TranslatePage() {
         setDownloading(true);
 
         try {
-            const response = await fetch("http://127.0.0.1:8000/api/v1/translate/download-pdf", {
+            const response = await fetch(`${API_BASE}/download-pdf`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -98,6 +114,70 @@ export default function TranslatePage() {
             setLog((prev) => [...prev, `PDF download failed: ${err}`]);
         } finally {
             setDownloading(false);
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // Voice recording handlers -> POST /voice-to-english
+    // ---------------------------------------------------------------------
+    const startRecording = async () => {
+        setVoiceError("");
+        setHindiText("");
+        setEnglishText("");
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) audioChunksRef.current.push(e.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                stream.getTracks().forEach((track) => track.stop());
+                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+                await submitVoiceRecording(audioBlob);
+            };
+
+            mediaRecorder.start();
+            mediaRecorderRef.current = mediaRecorder;
+            setIsRecording(true);
+        } catch (err) {
+            setVoiceError(`Microphone access failed: ${err}`);
+        }
+    };
+
+    const stopRecording = () => {
+        mediaRecorderRef.current?.stop();
+        setIsRecording(false);
+    };
+
+    const submitVoiceRecording = async (audioBlob: Blob) => {
+        setVoiceLoading(true);
+        setVoiceError("");
+
+        try {
+            const formData = new FormData();
+            formData.append("file", audioBlob, "recording.webm");
+
+            const response = await fetch(`${API_BASE}/voice-to-english`, {
+                method: "POST",
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => null);
+                throw new Error(errBody?.detail || "Voice processing failed");
+            }
+
+            const data = await response.json();
+            setHindiText(data.hindi_text);
+            setEnglishText(data.english_text);
+        } catch (err) {
+            setVoiceError(`${err}`);
+        } finally {
+            setVoiceLoading(false);
         }
     };
 
@@ -143,6 +223,40 @@ export default function TranslatePage() {
                     >
                         {downloading ? "Generating PDF..." : "Download as PDF"}
                     </button>
+                </div>
+            )}
+
+            <hr style={{ margin: "40px 0" }} />
+
+            <h2>Voice: Hindi Speech → English</h2>
+
+            <button
+                onClick={isRecording ? stopRecording : startRecording}
+                disabled={voiceLoading}
+                style={{
+                    padding: "8px 16px",
+                    background: isRecording ? "#d33" : undefined,
+                    color: isRecording ? "white" : undefined,
+                }}
+            >
+                {isRecording ? "Stop Recording" : voiceLoading ? "Processing..." : "Start Recording"}
+            </button>
+
+            {voiceError && (
+                <div style={{ color: "red", marginTop: 12 }}>{voiceError}</div>
+            )}
+
+            {hindiText && (
+                <div style={{ marginTop: 20 }}>
+                    <h3>Hindi Transcription</h3>
+                    <pre style={{ whiteSpace: "pre-wrap", background: "#f5f5f5", padding: 12 }}>{hindiText}</pre>
+                </div>
+            )}
+
+            {englishText && (
+                <div style={{ marginTop: 20 }}>
+                    <h3>English Translation</h3>
+                    <pre style={{ whiteSpace: "pre-wrap", background: "#f5f5f5", padding: 12 }}>{englishText}</pre>
                 </div>
             )}
         </div>
