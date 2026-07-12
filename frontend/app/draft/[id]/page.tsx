@@ -575,7 +575,13 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     };
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+      let apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      // If we are deployed on a remote server, ignore the local API URL bypass
+      // so that requests correctly use relative paths and go through Nginx.
+      if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        apiUrl = '';
+      }
+      
       const res = await fetch(`${apiUrl}/api/v1/drafts/suggest-citations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

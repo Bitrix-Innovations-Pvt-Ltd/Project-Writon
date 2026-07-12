@@ -32,3 +32,7 @@ python-docx
 # LLM Integrations
 openai
 jinja2==3.1.4
+
+# Text Chunking
+langchain
+langchain-text-splitters
