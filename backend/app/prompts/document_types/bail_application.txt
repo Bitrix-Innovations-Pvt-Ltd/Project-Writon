@@ -25,14 +25,16 @@ MANDATORY PARAGRAPHS (Body):
 
 DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
 
-{{ jurisdiction_warning }}
+{% if court_rules_block %}
+{{ court_rules_block }}
 
-CASE DETAILS:
-- Petitioner(s): {{ petitioners }}
-- Respondent(s): {{ respondents }}
+{% endif %}
+CASE DETAILS (Bail Application):
+- Applicant/Accused: {{ petitioners }}
+- State / Complainant: {{ respondents }}
 - Advocate: {{ form_data.advocate_name | default('Not provided') }} (Enrollment: {{ form_data.advocate_enrollment_no | default('') }})
-- Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('') }}
-- Impugned Order Date: {{ form_data.impugned_order_date | default('Not applicable') }}
+- Crime Number / FIR No.: {{ form_data.jurisdiction_basis | default('Not provided — fill from uploaded FIR') }}
+- Date of Arrest: {{ form_data.impugned_order_date | default('Not provided') }}
 
 FACTS:
 {{ form_data.facts_of_case }}
@@ -44,14 +46,11 @@ DATES AND EVENTS (reproduce ALL rows VERBATIM in the LIST_OF_DATES section as a 
 {% for de in form_data.dates_and_events %}| {{ de.date }} | {{ de.event }} |
 {% endfor %}{% else %}No dates provided — use ___/___/{{ current_year }} for filing date only.{% endif %}
 
-GROUNDS (user-provided):
-{{ form_data.grounds | default('Not provided — draft standard grounds based on facts') }}
+GROUNDS FOR BAIL (user-provided):
+{{ form_data.grounds | default('Not provided — draft standard bail grounds based on facts') }}
 
 RELIEF SOUGHT:
 {{ form_data.relief_sought }}
-
-INTERIM RELIEF:
-{{ form_data.interim_relief_sought | default('Not specifically requested') }}
 
 {{ uploaded_docs_context }}
 
@@ -61,14 +60,20 @@ RELEVANT STATUTES:
 RELEVANT PRECEDENTS:
 {{ judgments_block }}
 
+SPECIFIC DRAFTING INSTRUCTIONS (Bail Application):
+1. FIRST PAGE must prominently show (per court rules if applicable): Crime Number, Police Station, Section(s) and Act/Rules under which applicant is prosecuted/convicted, and whether this is the first, second, or subsequent application before this court.
+2. Draft a paragraph disclosing: whether any earlier bail application has been made before the Magistrate and/or Sessions Judge, and the result of such application(s). This is MANDATORY.
+3. The application must be accompanied by: copy of the FIR (if uploaded), date of alleged occurrence, date of applicant's arrest.
+4. Include grounds: (a) nature of offence and evidence, (b) applicant's roots in society / no flight risk, (c) no likelihood of tampering with evidence, (d) applicant's health/age/occupation if relevant, (e) parity with co-accused if applicable.
+5. State the Government Advocate notice requirement if at High Court level (not less than 10 days unless exempted for urgency).
+6. Number every paragraph consecutively.
+
 REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
 1. COVER_AND_INDEX
-2. SYNOPSIS
-3. LIST_OF_DATES
-4. MAIN_PETITION
-5. PRAYER
-6. AFFIDAVIT
-7. VAKALATNAMA
-8. ANNEXURES
+2. MAIN_APPLICATION
+3. PRAYER
+4. AFFIDAVIT
+5. VAKALATNAMA
+6. ANNEXURES
 
 Begin drafting now.

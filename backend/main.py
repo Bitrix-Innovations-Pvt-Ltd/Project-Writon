@@ -15,6 +15,7 @@ from app.api.v1 import (
     drafting as drafting_v1,
     courts as courts_v1,
     hierarchy as hierarchy_v1,
+    court_rules as court_rules_v1,
 )
 
 app = FastAPI(title="WritOnline API")
@@ -37,6 +38,7 @@ app.include_router(uploads_v1.router, prefix="/api/v1")
 app.include_router(drafting_v1.router, prefix="/api/v1")
 app.include_router(courts_v1.router, prefix="/api/v1/courts")
 app.include_router(hierarchy_v1.router, prefix="/api/v1/hierarchy")
+app.include_router(court_rules_v1.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
@@ -52,6 +54,15 @@ async def preload_models():
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/api/embed-missing")
+async def embed_missing():
+    import sys, os
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from scripts.embed_statutes import embed_statutes
+    import asyncio
+    asyncio.create_task(embed_statutes())
+    return {"status": "Embedding started in background. Check backend console."}
 
 
 if __name__ == "__main__":

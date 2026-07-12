@@ -20,6 +20,9 @@ from app.core.rag import (
     rewrite_queries,
     retrieve_judgment_chunks,
     retrieve_statutes,
+    retrieve_court_rules,
+    get_effective_structure_rules,
+    get_mandatory_paragraphs,
     rerank_candidates,
     assemble_prompt,
     verify_citations,
@@ -55,21 +58,27 @@ class GenerateRequest(BaseModel):
     draft_id: Optional[int] = None
     court_level: str = "supreme"
     court_display: str = "Supreme Court of India"
+    court_identity_id: Optional[int] = None   # sent explicitly from frontend Step 1b dropdown
     document_type: str = ""
+    document_type_key: Optional[str] = None   # prompt template key (e.g. 'writ_petition_civil')
     subject_matter: str = ""
     case_description: str = ""
     facts_of_case: str = ""
     grounds: str = ""
     relief_sought: str = ""
     interim_relief_sought: str = ""
+    mandatory_paragraphs: str = ""
     advocate_name: str = ""
     advocate_enrollment_no: str = ""
     petitioners: list = []
     respondents: list = []
     jurisdiction_basis: str = ""
     impugned_order_date: Optional[str] = None
+    dates_and_events: list = []
     selected_judgments: Optional[list] = None
     selected_statutes: Optional[list] = None
+    section_format_overrides: Optional[dict] = None
+    search_hint: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +109,9 @@ async def _rag_stream(req: GenerateRequest):
         print(f"Error fetching OCR text: {e}")
 
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
+
+    # queries populated in the RAG branch below; pre-init for court_rules scope
+    queries: list = []
 
     if req.selected_judgments is not None and req.selected_statutes is not None:
         # User has pre-selected the citations in Phase 6, bypass Stage 1-4
@@ -142,7 +154,66 @@ async def _rag_stream(req: GenerateRequest):
         top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=5)
 
     # ── Stage 5: Context Assembly ────────────────────────────────────────
-    prompt = assemble_prompt(form_data, top_judgments, top_statutes, uploaded_docs_context)
+    # Retrieve court-specific procedural rules (AHC or other specific courts)
+    court_rules_block = ""
+    if req.court_identity_id:
+        doc_type_key = req.document_type_key or ""
+        try:
+            embedding_fn = await _get_embedding_fn()
+            court_rules_block = await retrieve_court_rules(
+                engine,
+                req.court_identity_id,
+                doc_type_key,
+                queries,
+                embedding_fn,
+            )
+        except Exception as e:
+            print(f"Court Rules Error: {e}")
+            court_rules_block = ""
+            
+    # Fetch effective structure rules and mandatory paragraphs
+    structure_rules = []
+    mandatory_paragraphs = {}
+    doc_type_key = req.document_type_key or ""
+    try:
+        structure_rules = await get_effective_structure_rules(
+            engine,
+            req.court_level,
+            req.section_format_overrides or {}
+        )
+        mandatory_paragraphs = await get_mandatory_paragraphs(
+            engine,
+            req.court_level,
+            doc_type_key
+        )
+    except Exception as e:
+        print(f"Error fetching structure rules / mandatory paragraphs: {e}")
+        
+    # Persist user defaults if overrides were provided and we have a draft_id
+    if req.section_format_overrides and req.draft_id:
+        try:
+            async with engine.begin() as conn:
+                from sqlalchemy import text
+                await conn.execute(
+                    text("""
+                        UPDATE users 
+                        SET default_section_format_overrides = :overrides
+                        WHERE id = (SELECT user_id FROM drafts WHERE id = :d LIMIT 1)
+                    """),
+                    {"overrides": json.dumps(req.section_format_overrides), "d": req.draft_id}
+                )
+        except Exception as e:
+            print(f"Error persisting user defaults: {e}")
+
+    prompt = assemble_prompt(
+        form_data=form_data,
+        judgment_results=top_judgments,
+        statute_results=top_statutes,
+        uploaded_docs_context=uploaded_docs_context,
+        court_rules_block=court_rules_block,
+        structure_rules=structure_rules,
+        mandatory_paragraphs=mandatory_paragraphs,
+    )
 
     # ── Generation: GPT-4o via OpenRouter (streaming) ───────────────────
     yield "event: status\ndata: Generating draft...\n\n"
@@ -212,16 +283,42 @@ async def suggest_citations(req: GenerateRequest):
         print(f"Error fetching OCR text: {e}")
 
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
-    combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
+    combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{req.mandatory_paragraphs}\n{uploaded_docs_context}".strip()
     
-    queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter)
-    combined_query = " ".join(queries[:3])
+    queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter, search_hint=req.search_hint)
+    combined_query = " ".join(queries)  # Use all queries for reranking
 
     try:
         embedding_fn = await _get_embedding_fn()
-        judgment_task = retrieve_judgment_chunks(engine, queries, embedding_fn)
-        statute_task  = retrieve_statutes(engine, queries, embedding_fn)
-        coi_task      = retrieve_statutes(engine, queries, embedding_fn, coi_only=True)
+        
+        # Pre-calculate embeddings sequentially to avoid thread pool thrashing (21x concurrent runs)
+        # This drastically reduces CPU load and prevents timeouts.
+        from app.core.rag import _cpu_executor
+        query_vectors = {}
+        loop = asyncio.get_event_loop()
+        for q in queries:
+            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, q)
+            query_vectors[q] = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+
+        judgment_task = retrieve_judgment_chunks(
+            engine, queries, None,
+            document_type_key=req.document_type_key,
+            subject_matter=req.subject_matter,
+            context="citations",
+            query_vectors=query_vectors
+        )
+        statute_task  = retrieve_statutes(
+            engine, queries, None,
+            document_type_key=req.document_type_key,
+            context="citations",
+            query_vectors=query_vectors
+        )
+        coi_task      = retrieve_statutes(
+            engine, queries, None, coi_only=True,
+            document_type_key=req.document_type_key,
+            context="citations",
+            query_vectors=query_vectors
+        )
 
         judgment_results, statute_results, coi_results = await asyncio.gather(
             judgment_task, statute_task, coi_task
@@ -240,10 +337,13 @@ async def suggest_citations(req: GenerateRequest):
     print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
     print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
 
-    top_judgments  = await rerank_candidates(combined_query, judgment_results[:10], top_k=5)
-    top_statutes   = await rerank_candidates(combined_query, merged_statutes[:10], top_k=5)
+    # Rerank with cross-encoder enabled (No longer crashes event loop since wait_for was removed)
+    top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=8, use_cross_encoder=True)
+    top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=8, use_cross_encoder=True)
     
     return {
         "judgments": top_judgments,
-        "statutes": top_statutes
+        "statutes": top_statutes,
+        "queries_used": queries
     }
+

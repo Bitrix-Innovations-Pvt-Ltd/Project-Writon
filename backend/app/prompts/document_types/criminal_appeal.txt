@@ -25,14 +25,16 @@ MANDATORY PARAGRAPHS (Body):
 
 DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
 
-{{ jurisdiction_warning }}
+{% if court_rules_block %}
+{{ court_rules_block }}
 
-CASE DETAILS:
-- Petitioner(s): {{ petitioners }}
-- Respondent(s): {{ respondents }}
+{% endif %}
+CASE DETAILS (Criminal Appeal):
+- Appellant(s) / Accused: {{ petitioners }}
+- State / Respondent(s): {{ respondents }}
 - Advocate: {{ form_data.advocate_name | default('Not provided') }} (Enrollment: {{ form_data.advocate_enrollment_no | default('') }})
-- Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('') }}
-- Impugned Order Date: {{ form_data.impugned_order_date | default('Not applicable') }}
+- Impugned Judgment/Order Date: {{ form_data.impugned_order_date | default('Not provided') }}
+- Trial Court / Sessions Court: {{ form_data.jurisdiction_basis | default('Not provided') }}
 
 FACTS:
 {{ form_data.facts_of_case }}
@@ -44,13 +46,13 @@ DATES AND EVENTS (reproduce ALL rows VERBATIM in the LIST_OF_DATES section as a 
 {% for de in form_data.dates_and_events %}| {{ de.date }} | {{ de.event }} |
 {% endfor %}{% else %}No dates provided — use ___/___/{{ current_year }} for filing date only.{% endif %}
 
-GROUNDS (user-provided):
-{{ form_data.grounds | default('Not provided — draft standard grounds based on facts') }}
+GROUNDS OF APPEAL (user-provided):
+{{ form_data.grounds | default('Not provided — draft standard criminal appeal grounds') }}
 
 RELIEF SOUGHT:
 {{ form_data.relief_sought }}
 
-INTERIM RELIEF:
+INTERIM RELIEF (Suspension of Sentence / Bail pending appeal):
 {{ form_data.interim_relief_sought | default('Not specifically requested') }}
 
 {{ uploaded_docs_context }}
@@ -61,11 +63,20 @@ RELEVANT STATUTES:
 RELEVANT PRECEDENTS:
 {{ judgments_block }}
 
+SPECIFIC DRAFTING INSTRUCTIONS (Criminal Appeal):
+1. State the appellate jurisdiction provision (e.g., Section 374 CrPC / Section 415 BNSS for appeals against conviction).
+2. State whether the appellant is in custody or on bail, and since when — this is required for any bail pending appeal prayer.
+3. State the date of impugned judgment/order and confirm filing is within the limitation period (90 days for conviction appeals under CrPC / BNSS). If delayed, attach condonation application.
+4. Grounds must challenge specific findings of the trial court — appreciation of evidence, erroneous application of law, procedural irregularity, etc.
+5. If suspension of sentence is sought: draft a separate interlocutory application or include in the prayer with specific factual justification.
+6. Number every paragraph consecutively.
+7. The memorandum of appeal must accompany a certified copy of the judgment/order appealed against.
+
 REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
 1. COVER_AND_INDEX
 2. SYNOPSIS
 3. LIST_OF_DATES
-4. MAIN_PETITION
+4. MEMORANDUM_OF_APPEAL
 5. PRAYER
 6. AFFIDAVIT
 7. VAKALATNAMA

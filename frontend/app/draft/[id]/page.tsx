@@ -104,9 +104,49 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [impugnedOrderDate, setImpugnedOrderDate] = useState('');
   const [jurisdictionBasis, setJurisdictionBasis] = useState('');
   const [interimReliefSought, setInterimReliefSought] = useState('');
+  const [mandatoryParagraphs, setMandatoryParagraphs] = useState('');
+  const [datesAndEvents, setDatesAndEvents] = useState<{date: string, event: string}[]>([{date: '', event: ''}]);
+  const [searchHint, setSearchHint] = useState("");
 
   const [selectedHighCourt, setSelectedHighCourt] = useState('');
   const [selectedHighCourtBench, setSelectedHighCourtBench] = useState('');
+  // Court identity — specific court with a sourced rulebook (e.g. AHC)
+  // Populated from GET /api/v1/court-identities, sent explicitly in request bodies.
+  const [courtIdentities, setCourtIdentities] = useState<any[]>([]);
+  const [selectedCourtIdentityId, setSelectedCourtIdentityId] = useState<number | null>(null);
+  
+  const [sectionFormatOverrides, setSectionFormatOverrides] = useState<Record<string, boolean>>({});
+  const [availableOverrides, setAvailableOverrides] = useState<any[]>([]);
+  const [isLoadingOverrides, setIsLoadingOverrides] = useState(false);
+
+  useEffect(() => {
+    if (currentStep === 6) {
+      const fetchOverrides = async () => {
+        setIsLoadingOverrides(true);
+        try {
+          const shortCode = selectedCourtIdentityId 
+            ? courtIdentities.find(c => c.id === selectedCourtIdentityId)?.short_code 
+            : null;
+            
+          const url = shortCode 
+            ? `/api/v1/court-identities/${shortCode}/structure-rules`
+            : `/api/v1/court-identities/ALL/structure-rules`;
+            
+          const res = await fetch(url);
+          if (res.ok) {
+            const data = await res.json();
+            const eligible = data.filter((r: any) => r.source_type === 'convention' || r.source_type === 'unconfirmed');
+            setAvailableOverrides(eligible);
+          }
+        } catch (e) {
+          console.error("Failed to fetch overrides:", e);
+        }
+        setIsLoadingOverrides(false);
+      };
+      fetchOverrides();
+    }
+  }, [currentStep, selectedCourtIdentityId, courtIdentities]);
+  
   const [selectedState, setSelectedState] = useState('');
   const [selectedDistrictCourt, setSelectedDistrictCourt] = useState('');
   const [selectedSubLevel, setSelectedSubLevel] = useState<'tribunal' | 'special_court' | ''>('');
@@ -134,6 +174,19 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       }
     };
     fetchHighCourts();
+
+    const fetchCourtIdentities = async () => {
+      try {
+        const res = await fetch('/api/v1/court-identities');
+        if (res.ok) {
+          const data = await res.json();
+          setCourtIdentities(data);
+        }
+      } catch (err) {
+        console.error("Failed to fetch court identities", err);
+      }
+    };
+    fetchCourtIdentities();
   }, []);
 
   // Generation state
@@ -467,6 +520,24 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     }
   };
 
+  // Maps wizard display names to prompt template keys used in RAG + court_rule_document_mapping.
+  // Keep in sync with _DOC_TYPE_KEY_TO_TEMPLATE in rag.py.
+  const mapDocTypeToKey = (displayName: string): string => {
+    const map: Record<string, string> = {
+      'Writ Petition (Civil)':          'writ_petition_civil',
+      'Writ Petition (Criminal)':       'writ_petition_criminal',
+      'Public Interest Litigation (PIL)': 'writ_petition_civil',
+      'Writ Petition (Art. 32)':        'writ_petition_civil',
+      'Bail Application':               'bail_application',
+      'Bail Application (Sessions)':    'bail_application',
+      'Anticipatory Bail':              'anticipatory_bail',
+      'Civil Appeal':                   'civil_appeal',
+      'Criminal Appeal':                'criminal_appeal',
+      'Special Leave Petition':         'writ_petition_civil',
+    };
+    return map[displayName] || 'writ_petition_civil';
+  };
+
   const fetchCitations = async () => {
     setIsLoadingCitations(true);
     setSuggestedJudgments([]);
@@ -482,24 +553,30 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     const body = {
       court_level: courtLevel,
       court_display: courtDisplay,
+      court_identity_id: selectedCourtIdentityId,
       document_type: documentType,
+      document_type_key: mapDocTypeToKey(documentType),
       subject_matter: subjectMatter,
       case_description: caseDescription,
       facts_of_case: factsOfCase,
       grounds: grounds,
       relief_sought: reliefSought,
       interim_relief_sought: interimReliefSought,
+      mandatory_paragraphs: mandatoryParagraphs,
       advocate_name: advocateName,
       advocate_enrollment_no: advocateEnrollmentNo,
       petitioners: petitioners.filter(p => p.trim()),
       respondents: respondents.filter(r => r.trim()),
       jurisdiction_basis: jurisdictionBasis,
       impugned_order_date: impugnedOrderDate || null,
-      draft_id: params?.id ? parseInt(params.id) : undefined
+      dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
+      draft_id: params?.id ? parseInt(params.id as string) : undefined,
+      search_hint: searchHint.trim() || undefined
     };
 
     try {
-      const res = await fetch('/api/v1/drafts/suggest-citations', {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+      const res = await fetch(`${apiUrl}/api/v1/drafts/suggest-citations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -509,8 +586,15 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         setSuggestedJudgments(data.judgments || []);
         setSuggestedStatutes(data.statutes || []);
         
-        // Select all by default
-        setSelectedJudgmentIds(new Set((data.judgments || []).map((j: any) => j.id)));
+        // Select all statutes by default, but selectively pre-select judgments based on relevance
+        const jIds = new Set<string>();
+        (data.judgments || []).forEach((j: any, idx: number) => {
+          // Pre-select top 3, or anything with a positive cross-encoder score
+          if (idx < 3 || (j.rerank_score !== undefined && j.rerank_score > 0)) {
+            jIds.add(j.id);
+          }
+        });
+        setSelectedJudgmentIds(jIds);
         setSelectedStatuteIds(new Set((data.statutes || []).map((s: any) => s.id)));
       } else {
         console.error("Failed to fetch citations:", await res.text());
@@ -544,22 +628,27 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     const body = {
       court_level: courtLevel,
       court_display: courtDisplay,
+      court_identity_id: selectedCourtIdentityId,
       document_type: documentType,
+      document_type_key: mapDocTypeToKey(documentType),
       subject_matter: subjectMatter,
       case_description: caseDescription,
-      facts_of_case: '',
-      grounds: '',
-      relief_sought: '',
+      facts_of_case: factsOfCase,
+      grounds: grounds,
+      relief_sought: reliefSought,
       interim_relief_sought: interimReliefSought,
+      mandatory_paragraphs: mandatoryParagraphs,
       advocate_name: advocateName,
       advocate_enrollment_no: advocateEnrollmentNo,
       petitioners: petitioners.filter(p => p.trim()),
       respondents: respondents.filter(r => r.trim()),
       jurisdiction_basis: jurisdictionBasis,
       impugned_order_date: impugnedOrderDate || null,
+      dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
       selected_judgments: suggestedJudgments.filter(j => selectedJudgmentIds.has(j.id)),
       selected_statutes: suggestedStatutes.filter(s => selectedStatuteIds.has(s.id)),
-      draft_id: params?.id ? parseInt(params.id) : undefined
+      draft_id: params?.id ? parseInt(params.id) : undefined,
+      section_format_overrides: sectionFormatOverrides
     };
 
     try {
@@ -656,17 +745,36 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       <br clear="all" style="page-break-before:always" />
     `;
 
-    // Extract pages and append footer
-    let finalHtml = "";
-    const pages = editorRef.current.children;
-    for (let i = 0; i < pages.length; i++) {
-      finalHtml += pages[i].innerHTML;
-      if (i < pages.length - 1) {
-         finalHtml += footerHtml;
-      } else {
-         finalHtml += footerHtml.replace('<br clear="all" style="page-break-before:always" />', '');
+    // Sections list — signature appears after every section.
+    const sectionRegex = /<<SECTION:(\w+)>>([\s\S]*?)(?=<<SECTION:|<<END_SECTION>>|$)/g;
+    const parsedSections: { name: string; content: string }[] = [];
+    const seenSectionNames = new Set<string>();
+    let m;
+    while ((m = sectionRegex.exec(draftContent)) !== null) {
+      const content = m[2].replace(/<<END_SECTION>>/g, '').trim();
+      // Deduplicate: keep only first occurrence of each section name
+      if (content && !seenSectionNames.has(m[1])) {
+        seenSectionNames.add(m[1]);
+        parsedSections.push({ name: m[1], content });
       }
     }
+    // Fallback: if no markers found, treat entire content as a single unnamed section
+    if (parsedSections.length === 0 && draftContent.trim()) {
+      parsedSections.push({ name: 'MAIN_PETITION', content: draftContent.trim() });
+    }
+
+    let finalHtml = "";
+    parsedSections.forEach(({ name, content }, i) => {
+      // The editorRef DOM children match the order of parsedSections
+      const domPage = editorRef.current!.children[i];
+      finalHtml += domPage ? domPage.innerHTML : content;
+      // Append signature after every section
+      finalHtml += `<br/><br/>${footerHtml.replace('<br clear="all" style="page-break-before:always" />', '')}`;
+      // Page break between sections (not after the last)
+      if (i < parsedSections.length - 1) {
+        finalHtml += '<br clear="all" style="page-break-before:always" />';
+      }
+    });
     
     const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Draft Document</title></head><body>";
     const footer = "</body></html>";
@@ -706,6 +814,18 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const removeRespondent = (index: number) => {
     if (respondents.length > 1) {
       setRespondents(respondents.filter((_, i) => i !== index));
+    }
+  };
+
+  const addDateEvent = () => setDatesAndEvents([...datesAndEvents, {date: '', event: ''}]);
+  const updateDateEvent = (index: number, field: 'date' | 'event', value: string) => {
+    const newDE = [...datesAndEvents];
+    newDE[index][field] = value;
+    setDatesAndEvents(newDE);
+  };
+  const removeDateEvent = (index: number) => {
+    if (datesAndEvents.length > 1) {
+      setDatesAndEvents(datesAndEvents.filter((_, i) => i !== index));
     }
   };
 
@@ -834,6 +954,40 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                           );
                         })()}
                       </select>
+                    </div>
+                  )}
+
+                  {/* Court identity selector — unlocks rulebook-aware drafting */}
+                  {selectedHighCourt && courtIdentities.filter(ci => ci.court_level === 'high_court').length > 0 && (
+                    <div className="animate-fade-slide-up">
+                      <h3 className="font-bold text-on-surface mb-1">Court Rules (optional)</h3>
+                      <p className="text-xs text-on-surface-variant mb-2">
+                        Select to enable court-specific procedural rules (e.g. Allahabad HC Rules 1952) in your draft.
+                        Leave blank for generic drafting.
+                      </p>
+                      <select
+                        value={selectedCourtIdentityId ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setSelectedCourtIdentityId(val ? Number(val) : null);
+                        }}
+                        className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm bg-white"
+                      >
+                        <option value="">No specific rulebook (generic)</option>
+                        {courtIdentities
+                          .filter(ci => ci.court_level === 'high_court')
+                          .map((ci) => (
+                            <option key={ci.id} value={ci.id}>
+                              {ci.court_name} — {ci.rule_book_title || 'Court Rules'}
+                            </option>
+                          ))}
+                      </select>
+                      {selectedCourtIdentityId && (
+                        <p className="text-xs text-primary mt-1.5 flex items-center gap-1">
+                          <span className="material-symbols-outlined text-sm">check_circle</span>
+                          Rulebook-aware drafting enabled — procedural rules will be injected into the prompt.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1290,12 +1444,17 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 
                 {/* New Case Details */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-sm font-bold text-on-surface mb-1">Impugned Order Date</label>
-                    <p className="text-xs text-on-surface-variant mb-2">Required for calculating limitation period</p>
-                    <input type="date" value={impugnedOrderDate} onChange={(e) => setImpugnedOrderDate(e.target.value)} className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all text-on-surface bg-white" />
+                  <div className="col-span-full">
+                    <label className="block text-sm font-bold text-on-surface mb-1">Facts of Case *</label>
+                    <p className="text-xs text-on-surface-variant mb-2">Describe the facts in detail. The AI will use this to draft the petition body.</p>
+                    <textarea value={factsOfCase} onChange={(e) => setFactsOfCase(e.target.value)} placeholder="e.g. The petitioner was employed as... On [date], the respondent passed an order dated..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[140px] bg-white" />
                   </div>
-                  <div>
+                  <div className="col-span-full">
+                    <label className="block text-sm font-bold text-on-surface mb-1">Impugned Order / FIR Date</label>
+                    <p className="text-xs text-on-surface-variant mb-2">Date of the order, FIR, or arrest being challenged (if applicable).</p>
+                    <input type="date" value={impugnedOrderDate} onChange={(e) => setImpugnedOrderDate(e.target.value)} className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
+                  </div>
+                  <div className="col-span-full">
                     <label className="block text-sm font-bold text-on-surface mb-1">Jurisdiction Basis</label>
                     <p className="text-xs text-on-surface-variant mb-2">Why this court has jurisdiction</p>
                     <input type="text" value={jurisdictionBasis} onChange={(e) => setJurisdictionBasis(e.target.value)} placeholder="e.g. Cause of action arose in Delhi" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
@@ -1303,9 +1462,24 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-bold text-on-surface mb-1">Facts of the Case</label>
-                  <p className="text-xs text-on-surface-variant mb-2">Chronological facts with dates. Leave blank and AI will draft based on your description.</p>
-                  <textarea value={factsOfCase} onChange={(e) => setFactsOfCase(e.target.value)} placeholder="1. That the petitioner is the recorded owner of... 2. That on [date], the respondent..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[100px]" />
+                  <label className="block text-sm font-bold text-on-surface mb-1">List of Dates and Events</label>
+                  <p className="text-xs text-on-surface-variant mb-2">Provide a chronological list of important dates and events.</p>
+                  <div className="space-y-3">
+                    {datesAndEvents.map((de, index) => (
+                      <div key={`de-${index}`} className="flex gap-2 items-start">
+                        <input type="date" value={de.date} onChange={(e) => updateDateEvent(index, 'date', e.target.value)} className="w-[140px] p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white shrink-0" />
+                        <textarea value={de.event} onChange={(e) => updateDateEvent(index, 'event', e.target.value)} placeholder="Description of the event..." className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[60px]" />
+                        {datesAndEvents.length > 1 && (
+                          <button onClick={() => removeDateEvent(index)} className="p-3 text-error hover:bg-error/10 rounded-lg transition-colors border border-transparent shrink-0 mt-1">
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={addDateEvent} className="mt-3 flex items-center gap-2 text-sm font-bold text-primary hover:text-[#004131] transition-colors">
+                    <span className="material-symbols-outlined text-sm">add_circle</span> Add Another Date & Event
+                  </button>
                 </div>
 
                 <div>
@@ -1324,6 +1498,22 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   <label className="block text-sm font-bold text-on-surface mb-1">Interim Relief Sought (Optional)</label>
                   <p className="text-xs text-on-surface-variant mb-2">Urgent relief like stay orders, status quo.</p>
                   <textarea value={interimReliefSought} onChange={(e) => setInterimReliefSought(e.target.value)} placeholder="e.g. Stay the operation of the impugned order dated..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-bold text-on-surface mb-1">Mandatory Paragraphs (Optional)</label>
+                  <p className="text-xs text-on-surface-variant mb-2">Specify any mandatory paragraphs or declarations that must be included based on the draft type or past records.</p>
+                  <textarea value={mandatoryParagraphs} onChange={(e) => setMandatoryParagraphs(e.target.value)} placeholder="e.g. That no similar petition has been filed before this Hon'ble Court..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-bold text-on-surface mb-1">Lower Court Judgment (Optional)</label>
+                  <p className="text-xs text-on-surface-variant mb-2">Upload the lower court's judgment to automatically extract facts and reasoning via OCR for better drafting context.</p>
+                  <div className="flex items-center gap-4">
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => handleFileUpload(e, 'Lower Court Judgment')} className="w-full max-w-sm p-2 border border-outline-variant rounded-lg text-sm bg-white" />
+                    {uploadedDocs['Lower Court Judgment'] === 'uploading' && <span className="text-sm text-primary font-medium animate-pulse flex items-center gap-2"><span className="material-symbols-outlined text-sm">cloud_upload</span> Uploading & OCR...</span>}
+                    {uploadedDocs['Lower Court Judgment'] === 'uploaded' && <span className="text-sm text-[#0e6b52] font-bold flex items-center gap-1"><span className="material-symbols-outlined text-sm">check_circle</span> Uploaded & Processed</span>}
+                  </div>
                 </div>
 
                 <div className="bg-surface-container-lowest p-5 rounded-xl border border-outline-variant">
@@ -1363,9 +1553,28 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
 
           {currentStep === 6 && (
             <>
-              <div className="mb-6">
-                <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Citations</h2>
-                <p className="text-on-surface-variant text-sm">Review and select the legal precedents and statutes you want to cite in your draft.</p>
+              <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end justify-between">
+                <div>
+                  <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Select Citations</h2>
+                  <p className="text-on-surface-variant text-sm">Review and select the legal precedents and statutes you want to cite in your draft.</p>
+                </div>
+                <div className="flex items-center gap-2 max-w-sm w-full">
+                  <input
+                    type="text"
+                    placeholder="Search hint (e.g. 'wrongful arrest 41A')"
+                    className="flex-1 p-2 border border-outline-variant rounded-lg text-sm bg-surface"
+                    value={searchHint}
+                    onChange={e => setSearchHint(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && fetchCitations()}
+                  />
+                  <button 
+                    onClick={fetchCitations}
+                    className="px-3 py-2 bg-surface-container-high hover:bg-surface-container-highest border border-outline-variant rounded-lg text-sm font-medium flex items-center gap-1 transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">refresh</span>
+                    Refresh
+                  </button>
+                </div>
               </div>
 
               {isLoadingCitations ? (
@@ -1443,6 +1652,18 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 {judgment.year && (
                                   <span className="text-xs text-on-surface-variant">({judgment.year})</span>
                                 )}
+                                {judgment.case_type && (
+                                  <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border border-primary/20 text-primary bg-primary/5">{judgment.case_type}</span>
+                                )}
+                                {judgment.rerank_score !== undefined && (
+                                  <span className={`text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded ${
+                                    judgment.rerank_score > 2 ? 'bg-green-100 text-green-800' :
+                                    judgment.rerank_score > 0 ? 'bg-blue-100 text-blue-800' :
+                                    'bg-gray-100 text-gray-600'
+                                  }`}>
+                                    {judgment.rerank_score > 2 ? 'High Relevance' : judgment.rerank_score > 0 ? 'Medium Relevance' : 'Low Relevance'}
+                                  </span>
+                                )}
                               </div>
                               <p className="text-xs text-on-surface-variant mt-1 line-clamp-3">{judgment.text}</p>
                             </div>
@@ -1451,6 +1672,49 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                       </div>
                     )}
                   </div>
+                  
+                  {/* Section Format Overrides */}
+                  {availableOverrides.length > 0 && (
+                    <div className="mt-8 p-6 bg-surface-container-lowest border border-outline-variant rounded-xl">
+                      <h3 className="font-bold text-on-surface mb-2 flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">tune</span>
+                        Section Formatting (optional)
+                      </h3>
+                      <p className="text-sm text-on-surface-variant mb-4">
+                        By default, these follow standard practice. Check any box to break it into its own labeled section instead.
+                      </p>
+                      
+                      {isLoadingOverrides ? (
+                         <div className="flex justify-center p-4"><div className="w-6 h-6 border-2 border-primary/20 border-t-primary rounded-full animate-spin"></div></div>
+                      ) : (
+                        <div className="space-y-4">
+                          {availableOverrides.map(rule => (
+                            <label key={rule.rule_key} className="flex items-start gap-4 p-3 border border-outline-variant/50 rounded-lg hover:border-primary/30 transition-colors cursor-pointer">
+                              <input 
+                                type="checkbox"
+                                className="mt-1 w-4 h-4 text-primary rounded border-outline focus:ring-primary"
+                                checked={!!sectionFormatOverrides[rule.rule_key]}
+                                onChange={(e) => {
+                                  setSectionFormatOverrides(prev => ({
+                                    ...prev,
+                                    [rule.rule_key]: e.target.checked
+                                  }));
+                                }}
+                              />
+                              <div>
+                                <h4 className="font-medium text-sm text-on-surface">{rule.rule_description}</h4>
+                                <p className="text-xs text-on-surface-variant mt-0.5">
+                                  Default: {rule.is_heading ? "Heading" : "Plain paragraph"} 
+                                  {rule.source_type === 'unconfirmed' && ' (⚠️ Rule is unconfirmed)'}
+                                </p>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
                 </div>
               )}
             </>
@@ -1548,109 +1812,107 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                       min-height: 0 !important;
                       height: auto !important;
                     }
-                    .print-table { display: table !important; }
-                    .print-tfoot { display: table-footer-group !important; }
-                    .print-tbody { display: table-row-group !important; }
-                    .print-td { display: table-cell !important; }
                   `}
                 </style>
 
-                <table className="w-full block print-table">
-                  <tfoot className="hidden print-tfoot">
-                    <tr>
-                      <td className="border-none pt-4 pb-2">
-                        <table style={{ width: '100%', border: 'none', fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt' }}>
-                          <tbody>
-                            <tr>
-                              <td style={{ width: '50%', verticalAlign: 'bottom', border: 'none' }}>
-                                PLACE: ______________<br/>
-                                DATED: ______________
-                              </td>
-                              <td style={{ width: '50%', textAlign: 'right', verticalAlign: 'bottom', border: 'none' }}>
-                                <b>({(advocateName || "____________________").toUpperCase()})</b><br/>
-                                Advocate<br/>
-                                Enrollment No. {advocateEnrollmentNo || "_______________"}<br/>
-                                Counsel for Petitioner
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </td>
-                    </tr>
-                  </tfoot>
-                  <tbody className="block print-tbody">
-                    <tr>
-                      <td className="block print-td border-none p-0">
-                        <div ref={editorRef} className="print:bg-white">
-                          {draftContent.split(/<<SECTION:\w+>>|<<END_SECTION>>/).map(content => content.trim()).filter(content => content.length > 0).map((pageContent, index) => (
-                            <div 
-                              key={index}
-                              className="html2pdf__page-break max-w-[850px] mx-auto bg-white shadow-xl min-h-[1123px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
-                              style={{ 
-                                boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
-                                paddingTop: '1in',
-                                paddingRight: '1in',
-                                paddingBottom: '1in',
-                                paddingLeft: courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in',
-                                position: 'relative'
+                <div ref={editorRef} className="print:bg-white">
+                  {(() => {
+                    // Parse section names alongside content.
+                    // Signature appears after every section unconditionally.
+                    const sectionRegex = /<<SECTION:(\w+)>>([\s\S]*?)(?=<<SECTION:|<<END_SECTION>>|$)/g;
+                    const parsed: { name: string; content: string }[] = [];
+                    const seenNames = new Set<string>();
+                    let m;
+                    const src = draftContent;
+                    while ((m = sectionRegex.exec(src)) !== null) {
+                      const content = m[2].replace(/<<END_SECTION>>/g, '').trim();
+                      // Deduplicate: keep only the first occurrence of each section name
+                      if (content && !seenNames.has(m[1])) {
+                        seenNames.add(m[1]);
+                        parsed.push({ name: m[1], content });
+                      }
+                    }
+                    // Fallback when no markers
+                    if (parsed.length === 0 && src.trim()) {
+                      parsed.push({ name: 'MAIN_PETITION', content: src.trim() });
+                    }
+
+                    return parsed.map(({ name, content }, index) => (
+                      <div 
+                        key={index}
+                        className="html2pdf__page-break max-w-[850px] mx-auto bg-white shadow-xl min-h-[1123px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
+                        style={{ 
+                          boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
+                          paddingTop: '1in',
+                          paddingRight: '1in',
+                          paddingBottom: '0.5in',
+                          paddingLeft: courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in',
+                          position: 'relative'
+                        }}
+                      >
+                        {!isEditingMode && !hasEdited ? (
+                          <div 
+                            ref={el => { pageRefs.current[index] = el; }}
+                            className="text-on-surface outline-none prose prose-slate max-w-none"
+                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', lineHeight: '1.5' }}
+                          >
+                            <ReactMarkdown 
+                              remarkPlugins={[remarkGfm]}
+                              rehypePlugins={[rehypeRaw]}
+                              components={{
+                                hr: ({...props}) => <hr className="border-0 border-b border-dashed border-outline-variant w-full print:border-transparent print:m-0" style={{ margin: '2rem 0' }} {...props} />,
+                                table: ({...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
+                                th: ({...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
+                                td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
+                                h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '16pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                h3: ({...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
+                                ul: ({...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
+                                ol: ({...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
+                                li: ({...props}) => <li style={{ margin: '0.3rem 0', lineHeight: '1.5', textAlign: 'justify' }} {...props} />
                               }}
                             >
-                              {!isEditingMode && !hasEdited ? (
-                                <div 
-                                  ref={el => { pageRefs.current[index] = el; }}
-                                  className="text-on-surface outline-none prose prose-slate max-w-none"
-                                  style={{ 
-                                    fontFamily: '"Times New Roman", Times, serif', 
-                                    fontSize: '12pt',
-                                    lineHeight: '1.5'
-                                  }}
-                                >
-                                  <ReactMarkdown 
-                                    remarkPlugins={[remarkGfm]}
-                                    rehypePlugins={[rehypeRaw]}
-                                    components={{
-                                      hr: ({...props}) => <hr className="border-0 border-b border-dashed border-outline-variant w-full print:border-transparent print:m-0" style={{ margin: '2rem 0' }} {...props} />,
-                                      table: ({...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
-                                      th: ({...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
-                                      td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
-                                      h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '16pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                      h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                      h3: ({...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                      p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
-                                      ul: ({...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                                      ol: ({...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                                      li: ({...props}) => <li style={{ margin: '0.3rem 0', lineHeight: '1.5', textAlign: 'justify' }} {...props} />
-                                    }}
-                                  >
-                                    {pageContent}
-                                  </ReactMarkdown>
-                                </div>
-                              ) : (
-                                <div
-                                  contentEditable={isEditingMode}
-                                  className={`text-on-surface outline-none prose prose-slate max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
-                                  style={{ 
-                                    fontFamily: '"Times New Roman", Times, serif', 
-                                    fontSize: '12pt',
-                                    lineHeight: '1.5',
-                                    minHeight: '100%'
-                                  }}
-                                  dangerouslySetInnerHTML={{ __html: hasEdited ? htmlPages[index] : (pageRefs.current[index]?.innerHTML || '') }}
-                                  onInput={(e) => {
-                                    if (!hasEdited) setHasEdited(true);
-                                    const newHtml = [...(hasEdited ? htmlPages : pageRefs.current.map(r => r?.innerHTML || ''))];
-                                    newHtml[index] = e.currentTarget.innerHTML;
-                                    setHtmlPages(newHtml);
-                                  }}
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+                              {content}
+                            </ReactMarkdown>
+
+                            {/* Advocate signature — after every section */}
+                            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '50px', fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt' }}>
+                                <tbody>
+                                  <tr>
+                                    <td style={{ width: '50%', verticalAlign: 'bottom', border: 'none', padding: 0 }}>
+                                      PLACE: ______________<br/>
+                                      DATED: ______________
+                                    </td>
+                                    <td style={{ width: '50%', textAlign: 'right', verticalAlign: 'bottom', border: 'none', padding: 0 }}>
+                                      <b>({(advocateName || '____________________').toUpperCase()})</b><br/>
+                                      Advocate<br/>
+                                      Enrollment No. {advocateEnrollmentNo || '_______________'}<br/>
+                                      Counsel for Petitioner
+                                    </td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                          </div>
+                        ) : (
+                          <div
+                            contentEditable={isEditingMode}
+                            className={`text-on-surface outline-none prose prose-slate max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
+                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', lineHeight: '1.5', minHeight: '100%' }}
+                            dangerouslySetInnerHTML={{ __html: hasEdited ? htmlPages[index] : (pageRefs.current[index]?.innerHTML || '') }}
+                            onInput={(e) => {
+                              if (!hasEdited) setHasEdited(true);
+                              const newHtml = [...(hasEdited ? htmlPages : pageRefs.current.map(r => r?.innerHTML || ''))];
+                              newHtml[index] = e.currentTarget.innerHTML;
+                              setHtmlPages(newHtml);
+                            }}
+                          />
+                        )}
+                      </div>
+                    ));
+                  })()}
+                </div>
+
               </div>
 
               {/* Citation Verification Panel */}

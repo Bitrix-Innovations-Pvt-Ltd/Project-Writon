@@ -27,6 +27,10 @@ DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
 
 {{ jurisdiction_warning }}
 
+{% if court_rules_block %}
+{{ court_rules_block }}
+
+{% endif %}
 CASE DETAILS:
 - Petitioner(s): {{ petitioners }}
 - Respondent(s): {{ respondents }}

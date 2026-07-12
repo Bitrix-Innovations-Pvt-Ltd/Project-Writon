@@ -25,14 +25,16 @@ MANDATORY PARAGRAPHS (Body):
 
 DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
 
-{{ jurisdiction_warning }}
+{% if court_rules_block %}
+{{ court_rules_block }}
 
-CASE DETAILS:
+{% endif %}
+CASE DETAILS (Criminal Writ):
 - Petitioner(s): {{ petitioners }}
 - Respondent(s): {{ respondents }}
 - Advocate: {{ form_data.advocate_name | default('Not provided') }} (Enrollment: {{ form_data.advocate_enrollment_no | default('') }})
-- Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('') }}
-- Impugned Order Date: {{ form_data.impugned_order_date | default('Not applicable') }}
+- Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('Art. 226 of the Constitution of India') }}
+- Impugned FIR/Order Date: {{ form_data.impugned_order_date | default('Not provided') }}
 
 FACTS:
 {{ form_data.facts_of_case }}
@@ -60,6 +62,13 @@ RELEVANT STATUTES:
 
 RELEVANT PRECEDENTS:
 {{ judgments_block }}
+
+SPECIFIC DRAFTING INSTRUCTIONS (Criminal Writ):
+1. OPENING PARAGRAPHS: Draft paragraph 1 EXCLUSIVELY as a categorical "no prior petition" statement per court rules (ONLY this — no other content). Draft paragraph 2 EXCLUSIVELY as a separate, distinctly numbered caveat-notice statement per Ch. XXII R.1(3)(iii). These TWO paragraphs are MANDATORY, must appear before any facts, and must be SEPARATELY NUMBERED as 1. and 2. — do NOT merge them into a single paragraph under any circumstances.
+2. The petition is under Article 226 of the Constitution. State this clearly in the jurisdiction paragraph (unnumbered/unlabeled, no "Jurisdiction:" heading).
+3. For FIR-quashing matters: address the ingredients of the offence and why continuation of proceedings amounts to abuse of process. Cite Section 482 CrPC / Section 528 BNSS as applicable.
+4. Do NOT create section headings like "Jurisdiction:" — it is a plain paragraph.
+5. Number every paragraph in the main body consecutively.
 
 REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
 1. COVER_AND_INDEX

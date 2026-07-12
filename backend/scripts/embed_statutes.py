@@ -14,7 +14,13 @@ async def embed_statutes():
 
     print("Fetching statutes...")
     async with engine.begin() as conn:
-        res = await conn.execute(text("SELECT id, section_text, title FROM legal_code_sections WHERE embedding IS NULL"))
+        res = await conn.execute(text("""
+            SELECT lcs.id, lcs.section_text, lcs.title, lcs.section_number, 
+                   lc.code_name, lc.short_code
+            FROM legal_code_sections lcs
+            JOIN legal_codes lc ON lc.id = lcs.legal_code_id
+            WHERE lcs.embedding IS NULL
+        """))
         rows = res.fetchall()
 
     if not rows:
@@ -26,7 +32,7 @@ async def embed_statutes():
     batch_size = 100
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i+batch_size]
-        texts = [f"{r.title or ''}. {r.section_text or ''}" for r in batch]
+        texts = [f"{r.code_name} ({r.short_code}) Section {r.section_number}: {r.title or ''}. {r.section_text or ''}" for r in batch]
         
         vectors = model.encode(texts).tolist()
         

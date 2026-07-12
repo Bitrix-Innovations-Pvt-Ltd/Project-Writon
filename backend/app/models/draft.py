@@ -21,6 +21,9 @@ class Draft(Base):
     impugned_order_date = Column(DateTime)
     jurisdiction_basis = Column(String)
     interim_relief_sought = Column(String)
+    mandatory_paragraphs = Column(String)
+    dates_and_events = Column(JSON)
+    section_format_overrides = Column(JSON, default=dict)
     
     draft_html = Column(String)
     draft_text = Column(String)
