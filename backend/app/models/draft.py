@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Integer, BigInteger, DateTime, ForeignKey, JSON
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.sql import func
 from app.core.database import Base
 
@@ -24,6 +24,9 @@ class Draft(Base):
     mandatory_paragraphs = Column(String)
     dates_and_events = Column(JSON)
     section_format_overrides = Column(JSON, default=dict)
+    
+    chatbot_gap_fill_log = Column(JSONB, server_default='[]')
+    additional_context = Column(JSONB, server_default='[]')
     
     draft_html = Column(String)
     draft_text = Column(String)

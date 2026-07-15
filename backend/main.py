@@ -16,6 +16,7 @@ from app.api.v1 import (
     courts as courts_v1,
     hierarchy as hierarchy_v1,
     court_rules as court_rules_v1,
+    gapfill as gapfill_v1,
 )
 
 app = FastAPI(title="WritOnline API")
@@ -39,6 +40,7 @@ app.include_router(drafting_v1.router, prefix="/api/v1")
 app.include_router(courts_v1.router, prefix="/api/v1/courts")
 app.include_router(hierarchy_v1.router, prefix="/api/v1/hierarchy")
 app.include_router(court_rules_v1.router, prefix="/api/v1")
+app.include_router(gapfill_v1.router, prefix="/api/v1")
 
 
 @app.on_event("startup")

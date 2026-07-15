@@ -98,15 +98,41 @@ async def _rag_stream(req: GenerateRequest):
     try:
         async with engine.connect() as conn:
             from sqlalchemy import text
-            res = await conn.execute(
-                text("SELECT ocr_text FROM uploaded_docs WHERE draft_id = :d AND ocr_text IS NOT NULL"),
-                {"d": req.draft_id}
-            )
-            for row in res:
-                if len(row[0]) > 50:
-                    ocr_texts.append(row[0])
+            if req.draft_id:
+                res = await conn.execute(
+                    text("SELECT ocr_text FROM uploaded_docs WHERE draft_id = :d AND ocr_text IS NOT NULL"),
+                    {"d": req.draft_id}
+                )
+                for row in res:
+                    if len(row[0]) > 50:
+                        ocr_texts.append(row[0])
+                        
+                # Fetch additional_context from the chatbot phase
+                draft_res = await conn.execute(
+                    text("SELECT additional_context FROM drafts WHERE id = :d LIMIT 1"),
+                    {"d": req.draft_id}
+                )
+                draft_row = draft_res.fetchone()
+                if draft_row and draft_row[0]:
+                    try:
+                        add_ctx_list = draft_row[0]
+                        if isinstance(add_ctx_list, str):
+                            add_ctx_list = json.loads(add_ctx_list)
+                        
+                        if isinstance(add_ctx_list, list) and len(add_ctx_list) > 0:
+                            ctx_str = "\n\n--- ADDITIONAL CONTEXT (FROM CHATBOT) ---\n"
+                            for gap in add_ctx_list:
+                                q = gap.get("question", "")
+                                a = gap.get("answer", "")
+                                if q and a:
+                                    ctx_str += f"Q: {q}\nA: {a}\n\n"
+                            
+                            req.facts_of_case += ctx_str
+                            form_data["facts_of_case"] = req.facts_of_case
+                    except Exception as e:
+                        print(f"Error parsing additional_context: {e}")
     except Exception as e:
-        print(f"Error fetching OCR text: {e}")
+        print(f"Error fetching OCR text / additional context: {e}")
 
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
 
@@ -337,7 +363,7 @@ async def suggest_citations(req: GenerateRequest):
     print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
     print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
 
-    # Rerank with cross-encoder enabled (No longer crashes event loop since wait_for was removed)
+    # Rerank with cross-encoder enabled
     top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=8, use_cross_encoder=True)
     top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=8, use_cross_encoder=True)
     

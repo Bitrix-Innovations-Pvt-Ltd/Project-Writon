@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 
 import { districtCourtsData, tribunalsData, specialCourtsData } from './courtsData';
+import GapFillChat from '@/components/draft/GapFillChat';
 
 const indianStates = Object.keys(districtCourtsData).sort();
 
@@ -65,7 +66,11 @@ const getFallbackDocTypes = (level: string): string[] => {
 
 export default function DraftWizard({ params }: { params: { id: string } }) {
   const { userId } = useAuth();
+  const [activeDraftId, setActiveDraftId] = useState<number | undefined>(
+    params?.id && params.id !== 'new' ? parseInt(params.id as string) : undefined
+  );
   const [currentStep, setCurrentStep] = useState(1);
+  const [gapFillSummary, setGapFillSummary] = useState<any>(null);
   const [courtLevel, setCourtLevel] = useState('supreme');
   const [documentType, setDocumentType] = useState('');
   const [subjectMatter, setSubjectMatter] = useState('');
@@ -510,6 +515,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     }
 
     if (currentStep === 5) {
+      setCurrentStep(5.5);
+    } else if (currentStep === 5.5) {
       setCurrentStep(6);
       fetchCitations();
     } else if (currentStep < 7) {
@@ -570,7 +577,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       jurisdiction_basis: jurisdictionBasis,
       impugned_order_date: impugnedOrderDate || null,
       dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
-      draft_id: params?.id ? parseInt(params.id as string) : undefined,
+      draft_id: activeDraftId,
       search_hint: searchHint.trim() || undefined
     };
 
@@ -615,7 +622,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   };
 
   const handleBack = () => {
-    if (currentStep > 1) setCurrentStep(currentStep - 1);
+    if (currentStep === 6) setCurrentStep(5.5);
+    else if (currentStep === 5.5) setCurrentStep(5);
+    else if (currentStep > 1) setCurrentStep(currentStep - 1);
   };
 
   const startGeneration = async () => {
@@ -653,7 +662,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
       selected_judgments: suggestedJudgments.filter(j => selectedJudgmentIds.has(j.id)),
       selected_statutes: suggestedStatutes.filter(s => selectedStatuteIds.has(s.id)),
-      draft_id: params?.id ? parseInt(params.id) : undefined,
+      draft_id: activeDraftId,
       section_format_overrides: sectionFormatOverrides
     };
 
@@ -874,8 +883,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               {steps.map((step, index) => (
                 <div key={step.num} className="flex-1 flex items-center">
                   <div className="flex flex-col items-center gap-2 z-10 step-node relative w-full">
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold border-2 transition-colors ${currentStep > step.num ? 'bg-primary text-white border-primary' : currentStep === step.num ? 'bg-primary text-white border-primary shadow-[0_0_0_4px_rgba(14,107,82,0.1)]' : 'bg-surface-container-lowest text-outline border-outline-variant'}`}>
-                      {currentStep > step.num ? <span className="material-symbols-outlined text-xl">check</span> : step.num}
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold border-2 transition-colors ${currentStep > step.num && Math.floor(currentStep) !== step.num ? 'bg-primary text-white border-primary' : Math.floor(currentStep) === step.num ? 'bg-primary text-white border-primary shadow-[0_0_0_4px_rgba(14,107,82,0.1)]' : 'bg-surface-container-lowest text-outline border-outline-variant'}`}>
+                      {currentStep > step.num && Math.floor(currentStep) !== step.num ? <span className="material-symbols-outlined text-xl">check</span> : step.num}
                     </div>
                     <span className={`font-label-sm text-xs font-bold mt-1 transition-colors ${currentStep >= step.num ? 'text-primary' : 'text-on-surface-variant'}`}>{step.label}</span>
                   </div>
@@ -1555,6 +1564,50 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 </div>
               </div>
             </>
+          )}
+
+          {currentStep === 5.5 && (
+            <div className="w-full">
+              <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-4">Legal Assistant Review</h2>
+              <GapFillChat 
+                draftId={activeDraftId !== undefined ? activeDraftId : NaN}
+                documentTypeKey={mapDocTypeToKey(documentType)}
+                formData={{
+                  courtLevel,
+                  documentType,
+                  subjectMatter,
+                  caseDescription,
+                  factsOfCase,
+                  grounds,
+                  reliefSought,
+                  advocateName,
+                  advocateEnrollmentNo,
+                  petitioners,
+                  respondents,
+                  impugnedOrderDate: impugnedOrderDate ? impugnedOrderDate.toISOString() : null,
+                  jurisdictionBasis,
+                  interimReliefSought,
+                  mandatoryParagraphs,
+                  datesAndEvents,
+                }}
+                onComplete={(summary, updatedFormData, newDraftId) => {
+                  setGapFillSummary(summary);
+                  if (newDraftId) setActiveDraftId(newDraftId);
+                  if (updatedFormData) {
+                    setFactsOfCase(updatedFormData.facts_of_case || factsOfCase);
+                    setGrounds(updatedFormData.grounds || grounds);
+                    setReliefSought(updatedFormData.relief_sought || reliefSought);
+                    setAdvocateName(updatedFormData.advocate_name || advocateName);
+                    setAdvocateEnrollmentNo(updatedFormData.advocate_enrollment_no || advocateEnrollmentNo);
+                    setJurisdictionBasis(updatedFormData.jurisdiction_basis || jurisdictionBasis);
+                    setInterimReliefSought(updatedFormData.interim_relief_sought || interimReliefSought);
+                    setMandatoryParagraphs(updatedFormData.mandatory_paragraphs || mandatoryParagraphs);
+                  }
+                  setCurrentStep(6);
+                  fetchCitations();
+                }}
+              />
+            </div>
           )}
 
           {currentStep === 6 && (
