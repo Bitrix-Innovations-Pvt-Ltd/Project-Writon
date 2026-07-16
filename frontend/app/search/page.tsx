@@ -295,32 +295,6 @@ export default function SearchPage() {
                       </div>
                     </div>
 
-                    {/* Acts Cited Filter */}
-                    <div>
-                      <p className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-3 flex items-center gap-1.5">
-                        <span className="material-symbols-outlined text-[14px]">menu_book</span>
-                        Acts Cited
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {COMMON_ACTS.map((act) => {
-                          const isSelected = selectedActs.includes(act);
-                          return (
-                            <button
-                              key={act}
-                              id={`filter-act-${act.replace(/\s+/g, '-').toLowerCase()}`}
-                              onClick={() => toggleAct(act)}
-                              className={`px-4 py-1.5 rounded-full font-label-md text-sm shrink-0 transition-all duration-300 ${
-                                isSelected
-                                  ? 'bg-primary text-white border border-primary shadow-sm'
-                                  : 'bg-white text-on-surface-variant border border-outline-variant hover:border-primary hover:text-primary hover:bg-surface-container-low'
-                              }`}
-                            >
-                              {act}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
                   </div>
                 )}
 
