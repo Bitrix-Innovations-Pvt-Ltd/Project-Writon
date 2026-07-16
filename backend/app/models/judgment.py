@@ -38,6 +38,11 @@ class JudgmentChunk(Base):
     chunk_text = Column(String)
     embedding = Column(Vector(768))
     page_number = Column(Integer)
+    
+    # Advanced metadata for precision citations
+    paragraph_number_start = Column(Integer, nullable=True)
+    paragraph_number_end = Column(Integer, nullable=True)
+    chunking_method = Column(String, nullable=True) # 'paragraph_aware' or 'token_fallback'
 
 class SearchLog(Base):
     __tablename__ = "search_logs"

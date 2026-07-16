@@ -8,12 +8,23 @@ import { useDebounce } from '@/hooks/useDebounce';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
-const CASE_TYPES = ['Constitutional', 'Criminal', 'Civil', 'Family', 'Environmental', 'Property', 'Taxation'];
+// Maps UI label -> array of actual DB case_type values
+const CASE_TYPE_MAP: Record<string, string[]> = {
+  'Civil Appeal':          ['Civil Appeal'],
+  'Criminal Appeal':       ['Criminal Appeal'],
+  'Writ Petition':         ['Writ Petition'],
+  'SLP':                   ['Special Leave Petition', 'Slp'],
+  'Appeal':                ['Appeal'],
+  'Petition':              ['Petition', 'Review Petition', 'Curative Petition', 'Transfer Petition'],
+  'Reference / Suit':      ['Reference', 'Original Suit', 'Case'],
+};
+const CASE_TYPES = Object.keys(CASE_TYPE_MAP);
+
 const YEAR_RANGES = [
   { label: 'Last 5 years', value: [2020, 2021, 2022, 2023, 2024, 2025] },
   { label: '2010–2019', value: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019] },
   { label: '2000–2009', value: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009] },
-  { label: 'Before 2000', value: [] }, // handled separately as a flag
+  { label: 'Before 2000', value: Array.from({ length: 50 }, (_, i) => 1999 - i) },
 ];
 const COMMON_ACTS = [
   'IPC', 'CrPC', 'CPC', 'Evidence Act', 'Constitution of India',
@@ -55,7 +66,11 @@ export default function SearchPage() {
     limit: limit.toString(),
   });
   if (debouncedSearch) queryParams.append('q', debouncedSearch);
-  selectedCaseTypes.forEach((ct) => queryParams.append('case_type', ct));
+  // Expand each selected UI label into all matching DB case_type values
+  selectedCaseTypes.forEach((label) => {
+    const dbValues = CASE_TYPE_MAP[label] || [label];
+    dbValues.forEach((v) => queryParams.append('case_type', v));
+  });
   selectedYears.forEach((y) => queryParams.append('year', y.toString()));
   selectedActs.forEach((a) => queryParams.append('acts_cited', a));
 
@@ -124,7 +139,13 @@ export default function SearchPage() {
     setSelectedActs([]);
   };
 
-  const facets = data?.facets?.case_type || {};
+  // Build aggregated facet counts: sum all DB values belonging to each UI label
+  const rawFacets = data?.facets?.case_type || {};
+  const facets: Record<string, number> = {};
+  for (const [label, dbValues] of Object.entries(CASE_TYPE_MAP)) {
+    const total = (dbValues as string[]).reduce((sum, v) => sum + (rawFacets[v] || 0), 0);
+    if (total > 0) facets[label] = total;
+  }
 
   return (
     <div className="font-body-md text-on-surface bg-[#FAF9F6] min-h-screen relative selection:bg-primary-fixed selection:text-on-primary-fixed">
@@ -405,9 +426,16 @@ export default function SearchPage() {
                     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-surface-container-high text-primary">
                       {item.court} ({item.year})
                     </span>
-                    <span className="text-outline group-hover:text-primary transition-colors">
-                      <span className="material-symbols-outlined">open_in_new</span>
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {item.relevance != null && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#0e6b52]/10 text-[#0e6b52]" title="RRF Score * 10">
+                          Relevance: {item.relevance}
+                        </span>
+                      )}
+                      <span className="text-outline group-hover:text-primary transition-colors">
+                        <span className="material-symbols-outlined">open_in_new</span>
+                      </span>
+                    </div>
                   </div>
                   <h3
                     className="font-display-lg text-[20px] font-semibold text-on-background mb-3 leading-snug group-hover:text-primary transition-colors line-clamp-2"
@@ -418,9 +446,17 @@ export default function SearchPage() {
                   <span className="inline-block px-2 py-1 rounded bg-primary-fixed text-on-primary-fixed text-[12px] font-semibold uppercase mb-4 tracking-wider truncate max-w-full">
                     {item.case_type}
                   </span>
-                  <p className="text-on-surface-variant font-body-md line-clamp-3 mb-4 italic">
-                    &ldquo;{item.summary || item.holding || 'No summary available for this judgment.'}&rdquo;
-                  </p>
+                  
+                  {item.snippet ? (
+                    <p 
+                      className="text-on-surface-variant font-body-md line-clamp-3 mb-4 italic" 
+                      dangerouslySetInnerHTML={{ __html: `&ldquo;${item.snippet.replace(/<b>/g, '<b class="text-primary bg-primary/10">')}&rdquo;` }} 
+                    />
+                  ) : (
+                    <p className="text-on-surface-variant font-body-md line-clamp-3 mb-4 italic">
+                      &ldquo;{item.summary || item.holding || 'No summary available for this judgment.'}&rdquo;
+                    </p>
+                  )}
                   <div className="flex items-center gap-2 pt-4 border-t border-outline-variant transition-colors duration-300 group-hover:border-primary/20">
                     <span className="material-symbols-outlined text-[16px] text-outline">gavel</span>
                     <span className="text-xs font-semibold text-outline truncate" title={item.binding_on}>

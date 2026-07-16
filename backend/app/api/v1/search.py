@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -55,6 +56,41 @@ async def _exec_query(sql: str, params: dict) -> list:
         return result.fetchall()
 
 
+_LEGAL_ABBREVS = {"IPC", "BNS", "CRPC", "BNSS", "COI", "SCC", "AIR",
+                  "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "PMLA"}
+
+def _get_ts_config(query: str) -> str:
+    words = query.strip().upper().split()
+    if any(w in _LEGAL_ABBREVS for w in words) or len(words) <= 3:
+        return "simple"
+    return "english"
+
+LEGAL_EXPANSIONS = {
+    "IPC": "Indian Penal Code",
+    "CrPC": "Code of Criminal Procedure",
+    "BNSS": "Bharatiya Nagarik Suraksha Sanhita",
+    "CPC": "Code of Civil Procedure",
+    "NI Act": "Negotiable Instruments Act",
+    "POCSO": "Protection of Children from Sexual Offences",
+}
+
+def expand_query(q: str) -> str:
+    expanded = q
+    for abbrev, full in LEGAL_EXPANSIONS.items():
+        if abbrev.lower() in q.lower() and full.lower() not in q.lower():
+            expanded += f" {full}"
+    return expanded
+
+def classify_query(q: str) -> str:
+    if re.search(r'\d{4}\s+SCC\s+\d+|\d{4}\s+AIR\s+SC', q, re.I):
+        return "citation"
+    if re.search(r'section\s+\d+[A-Z]?\s+(of\s+)?\w+', q, re.I):
+        return "section_ref"
+    if ' v. ' in q or ' vs ' in q.lower() or ' versus ' in q.lower():
+        return "party_name"
+    return "concept"
+
+
 # ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
@@ -78,18 +114,25 @@ async def search_precedents(
             filters.append(Judgment.case_type.in_(case_type))
         if year:
             filters.append(Judgment.year.in_(year))
+        if acts_cited:
+            # PostgreSQL ARRAY overlap: any of the selected acts must appear in acts_cited
+            filters.append(Judgment.acts_cited.overlap(acts_cited))
 
         judgments: list = []
         total_items: int = 0
+        rrf_scores: dict = {}
 
         # ── Branch: semantic + keyword hybrid search ─────────────────────────
         if q:
+            q_type = classify_query(q)
+            expanded_q = expand_query(q)
+
             ai_model = await get_model()
 
             # Encode on the thread pool so the event loop is not blocked
             loop = asyncio.get_event_loop()
             query_vector = await loop.run_in_executor(
-                None, lambda: ai_model.encode(q).tolist()
+                None, lambda: ai_model.encode(expanded_q).tolist()
             )
 
             # ── Build SQL ────────────────────────────────────────────────────
@@ -108,53 +151,115 @@ async def search_precedents(
 
             # Vector (pgvector cosine distance) search
             vector_sql = f"""
-                SELECT id,
-                       ROW_NUMBER() OVER (ORDER BY embedding <-> :q_vec) AS rank
+                SELECT id, embedding <=> :q_vec AS dist
                 FROM   judgments
                 WHERE  embedding IS NOT NULL
                 {extra_sql}
-                ORDER  BY rank
+                ORDER  BY embedding <=> :q_vec
                 LIMIT  50
             """
             vector_params = {"q_vec": str(query_vector), **shared_params}
 
+            ts_cfg = _get_ts_config(expanded_q)
             # Full-text (tsvector / BM25-proxy) search
             keyword_sql = f"""
-                SELECT id,
-                       ROW_NUMBER() OVER (
-                           ORDER BY ts_rank(search_vector,
-                                            websearch_to_tsquery('english', :q)) DESC
-                       ) AS rank
+                SELECT id, 
+                       ts_rank_cd(search_vector, websearch_to_tsquery('{ts_cfg}', :expanded_q)) +
+                       ts_rank_cd(search_vector, phraseto_tsquery('{ts_cfg}', :original_q)) AS score
                 FROM   judgments
-                WHERE  search_vector @@ websearch_to_tsquery('english', :q)
+                WHERE  search_vector @@ websearch_to_tsquery('{ts_cfg}', :expanded_q)
                 {extra_sql}
-                ORDER  BY rank
+                ORDER  BY score DESC
                 LIMIT  50
             """
-            keyword_params = {"q": q, **shared_params}
+            keyword_params = {"expanded_q": expanded_q, "original_q": q, **shared_params}
+
+            # ── Title Match ──────────────────────────────────────────────────
+            pet_pat = f"%{q.strip()}%"
+            res_pat = f"%{q.strip()}%"
+            if " v. " in q.lower() or " vs " in q.lower() or " versus " in q.lower():
+                parts = re.split(r'\s+v\.\s+|\s+vs\s+|\s+versus\s+', q, flags=re.IGNORECASE)
+                pet_pat = f"%{parts[0].strip()}%"
+                if len(parts) > 1:
+                    res_pat = f"%{parts[1].strip()}%"
+                
+                title_match_sql = f"""
+                    SELECT id
+                    FROM judgments
+                    WHERE (petitioner ILIKE :pet AND respondent ILIKE :res)
+                       OR (petitioner ILIKE :res AND respondent ILIKE :pet)
+                    {extra_sql}
+                    LIMIT 20
+                """
+                title_params = {"pet": pet_pat, "res": res_pat, **shared_params}
+            else:
+                title_match_sql = f"""
+                    SELECT id
+                    FROM judgments
+                    WHERE petitioner ILIKE :pat OR respondent ILIKE :pat OR case_number ILIKE :pat
+                    {extra_sql}
+                    LIMIT 20
+                """
+                title_params = {"pat": f"%{q.strip()}%", **shared_params}
 
             # ── True parallel execution on separate pool connections ──────────
             # Each _exec_query() call acquires its own connection from
             # engine's connection pool, so asyncio.gather() is safe here.
-            vec_rows, kw_rows = await asyncio.gather(
+            vec_rows, kw_rows, title_rows = await asyncio.gather(
                 _exec_query(vector_sql, vector_params),
                 _exec_query(keyword_sql, keyword_params),
+                _exec_query(title_match_sql, title_params),
             )
+            
+            # ── Typo Fallback for Keyword Search ─────────────────────────────
+            # If a concept query has very few keyword matches (e.g. < 10), it's likely a typo 
+            # (e.g., "warrent") or too strict. We run a relaxed OR query to rescue the search.
+            if len(kw_rows) < 10 and q_type == "concept":
+                words = [w for w in re.split(r'\W+', q) if len(w) > 2]
+                if len(words) > 1:
+                    or_query = " | ".join(words)
+                    fallback_sql = f"""
+                        SELECT id, ts_rank_cd(search_vector, to_tsquery('{ts_cfg}', :or_q)) AS score
+                        FROM   judgments
+                        WHERE  search_vector @@ to_tsquery('{ts_cfg}', :or_q)
+                        {extra_sql}
+                        ORDER  BY score DESC
+                        LIMIT  50
+                    """
+                    kw_rows = await _exec_query(fallback_sql, {"or_q": or_query, **shared_params})
 
-            semantic_ranks = {row.id: row.rank for row in vec_rows}
-            keyword_ranks = {row.id: row.rank for row in kw_rows}
+            # Assign ranks based on the returned order
+            semantic_ranks = {row.id: i + 1 for i, row in enumerate(vec_rows)}
+            keyword_ranks = {row.id: i + 1 for i, row in enumerate(kw_rows)}
+            title_matches = {row.id for row in title_rows}
 
-            # ── Reciprocal Rank Fusion (RRF) ─────────────────────────────────
-            # Keyword results get a 2× multiplier so that exact legal citations
-            # (e.g. "Section 302 IPC") always outrank purely semantic matches.
-            all_ids = set(semantic_ranks) | set(keyword_ranks)
+            # ── Adaptive Reciprocal Rank Fusion (RRF) ────────────────────────
+            # Adjust weights dynamically based on query classification
+            sem_weight = 1.0
+            kw_weight = 2.0  # default favors keyword exact match
+            
+            if q_type == "citation":
+                sem_weight, kw_weight = 0.5, 4.0  # Must match exact citation
+            elif q_type == "party_name":
+                sem_weight, kw_weight = 0.5, 3.0  # Names don't embed well
+            elif q_type == "concept":
+                # Since the current model is an MLM (not STS fine-tuned), it generates
+                # highly anisotropic embeddings (noise). We must prioritize keyword match 
+                # (especially typo-fallback OR matches) over semantic rank.
+                sem_weight, kw_weight = 0.5, 3.0
+            elif q_type == "section_ref":
+                sem_weight, kw_weight = 1.0, 2.0  # Balanced
+
+            all_ids = set(semantic_ranks) | set(keyword_ranks) | title_matches
             rrf_scores: dict = {}
             for j_id in all_ids:
                 score = 0.0
                 if j_id in semantic_ranks:
-                    score += 1.0 / (60 + semantic_ranks[j_id])
+                    score += sem_weight / (60 + semantic_ranks[j_id])
                 if j_id in keyword_ranks:
-                    score += 2.0 / (60 + keyword_ranks[j_id])
+                    score += kw_weight / (60 + keyword_ranks[j_id])
+                if j_id in title_matches:
+                    score += 5.0  # Massive boost for direct title matches
                 rrf_scores[j_id] = score
 
             sorted_ids = sorted(rrf_scores, key=rrf_scores.__getitem__, reverse=True)
@@ -166,10 +271,20 @@ async def search_precedents(
 
             if paginated_ids:
                 db_res = await db.execute(
-                    select(Judgment).where(Judgment.id.in_(paginated_ids))
+                    select(
+                        Judgment.id, Judgment.petitioner, Judgment.respondent,
+                        Judgment.year, Judgment.case_type, Judgment.summary,
+                        Judgment.case_number,
+                        func.ts_headline(
+                            'english', 
+                            func.coalesce(Judgment.summary, '') + ' ' + func.coalesce(Judgment.holding, ''),
+                            func.websearch_to_tsquery(ts_cfg, expanded_q),
+                            'MaxFragments=2, MaxWords=30, MinWords=10'
+                        ).label("snippet")
+                    ).where(Judgment.id.in_(paginated_ids))
                 )
-                db_judgments = db_res.scalars().all()
-                id_to_judgment = {j.id: j for j in db_judgments}
+                db_judgments = db_res.mappings().all()
+                id_to_judgment = {j["id"]: j for j in db_judgments}
                 judgments = [
                     id_to_judgment[j_id]
                     for j_id in paginated_ids
@@ -182,16 +297,30 @@ async def search_precedents(
             for f in filters:
                 base_query = base_query.where(f)
 
-            count_query = select(func.count()).select_from(base_query.subquery())
+            count_query = select(func.count(Judgment.id))
+            for f in filters:
+                count_query = count_query.where(f)
             total_items = (await db.execute(count_query)).scalar() or 0
 
-            paginated_query = (
-                base_query
+            paginated_ids_query = (
+                base_query.with_only_columns(Judgment.id)
                 .order_by(Judgment.year.desc().nulls_last(), Judgment.id.asc())
                 .offset((page - 1) * limit)
                 .limit(limit)
             )
-            judgments = (await db.execute(paginated_query)).scalars().all()
+            paginated_ids = (await db.execute(paginated_ids_query)).scalars().all()
+
+            if paginated_ids:
+                judgments_query = select(
+                    Judgment.id, Judgment.petitioner, Judgment.respondent,
+                    Judgment.year, Judgment.case_type, Judgment.summary,
+                    Judgment.case_number
+                ).where(Judgment.id.in_(paginated_ids))
+                judgments_unsorted = (await db.execute(judgments_query)).mappings().all()
+                judgments_dict = {j["id"]: j for j in judgments_unsorted}
+                judgments = [judgments_dict[jid] for jid in paginated_ids if jid in judgments_dict]
+            else:
+                judgments = []
 
         # ── Facet counts ──────────────────────────────────────────────────────
         facet_case_type: dict = {}
@@ -203,9 +332,11 @@ async def search_precedents(
 
         ct_query = (
             select(Judgment.case_type, func.count())
-            .select_from(base_query.subquery())
             .group_by(Judgment.case_type)
         )
+        for f in filters:
+            ct_query = ct_query.where(f)
+
         for row in (await db.execute(ct_query)).all():
             if row[0]:
                 facet_case_type[row[0]] = row[1]
@@ -213,22 +344,35 @@ async def search_precedents(
         # ── Serialise response ────────────────────────────────────────────────
         items = []
         for j in judgments:
-            title = (
-                f"{j.petitioner} v. {j.respondent}"
-                if j.petitioner and j.respondent
-                else "Unknown v. Unknown"
-            )
+            petitioner = j["petitioner"] if isinstance(j, dict) else j.petitioner
+            respondent  = j["respondent"]  if isinstance(j, dict) else j.respondent
+            year        = j["year"]        if isinstance(j, dict) else j.year
+            case_type   = j["case_type"]   if isinstance(j, dict) else j.case_type
+            summary     = j["summary"]     if isinstance(j, dict) else j.summary
+            snippet     = j.get("snippet") if isinstance(j, dict) else getattr(j, "snippet", None)
+            case_number = j.get("case_number") if isinstance(j, dict) else getattr(j, "case_number", None)
+            jid         = j["id"]          if isinstance(j, dict) else j.id
+            
+            if petitioner and respondent:
+                title = f"{petitioner} v. {respondent}"
+            elif case_number:
+                title = case_number
+            else:
+                title = "Unknown v. Unknown"
+
             items.append(
                 {
-                    "id": j.id,
+                    "id": jid,
                     "title": title,
-                    "year": j.year or "N/A",
-                    "case_type": j.case_type or "General",
-                    "summary": j.summary or "",
+                    "year": year or "N/A",
+                    "case_type": case_type or "General",
+                    "summary": summary or "",
+                    "snippet": snippet or "",
+                    "relevance": round(rrf_scores.get(jid, 0.0) * 10, 2) if jid in rrf_scores else None,
                     "court": "SC",
                     "binding_on": (
                         "All High Courts & District Courts"
-                        if "Constitutional" in (j.case_type or "")
+                        if "Constitutional" in (case_type or "")
                         else "Relevant Subordinate Courts"
                     ),
                 }
