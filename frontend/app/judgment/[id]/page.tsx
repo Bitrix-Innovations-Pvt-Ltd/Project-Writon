@@ -30,37 +30,76 @@ export default function JudgmentDetailPage() {
   // Formatting helper to highlight key structure like "List of Acts", "Case Arising From", etc.
   const formatStructuredText = (text: string) => {
     if (!text) return null;
-    return text.split('\n').map((line, idx) => {
+    
+    // Clean PDF formatting artifacts
+    // Remove marginal letters A-H on their own lines (common in Supreme Court PDFs)
+    let cleanedText = text.replace(/\n\s*[A-H]\s*\n/g, '\n');
+    
+    const lines = cleanedText.split('\n');
+    const paragraphs: string[] = [];
+    let currentParagraph = '';
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      if (!line) continue;
+      
+      const isHeading = 
+        line === 'List of Acts' || 
+        line === 'List of Keywords' || 
+        line === 'Case Arising From' || 
+        line === 'Issue for Consideration' || 
+        line === 'Headnotes+' ||
+        /^[A-Z][A-Z\s]+$/.test(line);
+        
+      const isList = /^[0-9]+\./.test(line);
+      
+      if (isHeading || isList || currentParagraph === '') {
+        if (currentParagraph) paragraphs.push(currentParagraph);
+        currentParagraph = line;
+      } else {
+        if (currentParagraph.endsWith('-')) {
+          currentParagraph = currentParagraph.slice(0, -1) + line;
+        } else {
+          currentParagraph += ' ' + line;
+        }
+      }
+    }
+    if (currentParagraph) paragraphs.push(currentParagraph);
+
+    return paragraphs.map((para, idx) => {
       // Highlight specific headings
       if (
-        line.trim() === 'List of Acts' ||
-        line.trim() === 'List of Keywords' ||
-        line.trim() === 'Case Arising From' ||
-        line.trim() === 'Issue for Consideration' ||
-        line.trim() === 'Headnotes+'
+        para === 'List of Acts' ||
+        para === 'List of Keywords' ||
+        para === 'Case Arising From' ||
+        para === 'Issue for Consideration' ||
+        para === 'Headnotes+' ||
+        /^[A-Z][A-Z\s]+$/.test(para)
       ) {
         return (
-          <div key={idx} className="font-bold text-primary mt-4 mb-2 text-base">
-            {line}
+          <div key={idx} className="font-bold text-primary mt-6 mb-2 text-base">
+            {para}
           </div>
         );
       }
+
       // Bold important acts like Constitution of India, IPC, etc.
-      let formattedLine = line;
+      let formattedPara = para;
       const acts = ['Constitution of India', 'Indian Penal Code', 'Code of Criminal Procedure'];
       acts.forEach((act) => {
-        if (formattedLine.includes(act)) {
-          formattedLine = formattedLine.replace(
+        if (formattedPara.includes(act)) {
+          formattedPara = formattedPara.replace(
             new RegExp(act, 'g'),
             `**${act}**`
           );
         }
       });
+
       // Handle the bolding we just added
-      const parts = formattedLine.split(/\*\*(.*?)\*\*/g);
-      
+      const parts = formattedPara.split(/\*\*(.*?)\*\*/g);
+
       return (
-        <p key={idx} className="mb-2 leading-relaxed">
+        <p key={idx} className="mb-4 leading-relaxed">
           {parts.map((part, pIdx) =>
             pIdx % 2 === 1 ? (
               <span key={pIdx} className="font-bold text-[#0a523f] bg-primary/5 px-1 rounded">
@@ -185,11 +224,10 @@ export default function JudgmentDetailPage() {
                     onClick={handleDownload}
                     disabled={!judgment.has_pdf || isDownloading}
                     title={!judgment.has_pdf ? 'PDF not available for this judgment' : 'Download original PDF from S3'}
-                    className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-label-md text-sm font-bold transition-all duration-300 ${
-                      judgment.has_pdf
+                    className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-label-md text-sm font-bold transition-all duration-300 ${judgment.has_pdf
                         ? 'bg-primary text-white hover:bg-[#004131] hover:-translate-y-0.5 hover:shadow-[0_6px_16px_rgba(14,107,82,0.3)] active:scale-95'
                         : 'bg-surface-container-high text-outline cursor-not-allowed opacity-60'
-                    }`}
+                      }`}
                   >
                     {isDownloading ? (
                       <span className="material-symbols-outlined text-[18px] animate-spin">autorenew</span>
@@ -217,11 +255,10 @@ export default function JudgmentDetailPage() {
                       key={key}
                       id={`tab-${key}`}
                       onClick={() => setActiveTab(key as typeof activeTab)}
-                      className={`flex-1 flex items-center justify-center gap-2 py-4 px-3 text-sm font-semibold transition-all duration-200 border-b-2 ${
-                        activeTab === key
+                      className={`flex-1 flex items-center justify-center gap-2 py-4 px-3 text-sm font-semibold transition-all duration-200 border-b-2 ${activeTab === key
                           ? 'border-primary text-primary bg-primary/5'
                           : 'border-transparent text-on-surface-variant hover:text-on-background hover:bg-surface-container-low'
-                      }`}
+                        }`}
                     >
                       <span className="material-symbols-outlined text-[18px]">{icon}</span>
                       <span className="hidden sm:inline">{label}</span>
