@@ -8,8 +8,11 @@ model = SentenceTransformer(
 print("Legal-BERT cached successfully.")
 
 print("Pre-downloading Cross-Encoder model weights...")
+import torch
 reranker = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
     cache_dir="/model_cache",
+    device="cpu",
+    model_kwargs={"torch_dtype": torch.float32}
 )
 print("Cross-Encoder cached successfully.")
