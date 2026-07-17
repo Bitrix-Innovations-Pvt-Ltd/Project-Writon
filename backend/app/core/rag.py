@@ -149,7 +149,7 @@ async def load_reranker():
                 import torch
                 _reranker = await loop.run_in_executor(
                     None,
-                    lambda: CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu", model_kwargs={"torch_dtype": torch.float32})
+                    lambda: CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu", automodel_args={"torch_dtype": torch.float32})
                 )
                 print("Cross-encoder reranker loaded.")
     return _reranker
