@@ -32,7 +32,7 @@ export default function GapFillChat({ draftId, documentTypeKey, formData, onComp
 
   async function startGapFill() {
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/gapfill/start`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gapfill/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -70,7 +70,7 @@ export default function GapFillChat({ draftId, documentTypeKey, formData, onComp
     setInputValue("");
     
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/gapfill/answer`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gapfill/answer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
