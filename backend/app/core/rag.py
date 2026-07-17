@@ -638,8 +638,8 @@ async def retrieve_statutes(
                 vec_rows = await _exec_raw(engine, vector_sql, vec_params)
                 kw_rows = []
 
-            sem_ranks = {r.id: r.rank for r in vec_rows}
-            kw_ranks  = {r.id: r.rank for r in kw_rows}
+            sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
+            kw_ranks  = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
             all_ids   = set(sem_ranks) | set(kw_ranks)
             row_data  = {r.id: r for r in (list(vec_rows) + list(kw_rows))}
 
@@ -742,34 +742,31 @@ async def retrieve_court_rules(
                 vector_sql = """
                     SELECT id, chapter_number, chapter_title,
                            rule_number, rule_subsection, rule_text,
-                           ROW_NUMBER() OVER (ORDER BY embedding <-> :q_vec) AS rank
+                           embedding <-> :q_vec AS distance
                     FROM court_rule_sections
                     WHERE court_identity_id = :cid
                       AND chapter_number = ANY(:ch)
                       AND embedding IS NOT NULL
-                    ORDER BY rank
+                    ORDER BY distance
                     LIMIT 10
                 """
                 keyword_sql = """
                     SELECT id, chapter_number, chapter_title,
                            rule_number, rule_subsection, rule_text,
-                           ROW_NUMBER() OVER (
-                               ORDER BY ts_rank(search_vector,
-                                                websearch_to_tsquery('english', :q)) DESC
-                           ) AS rank
+                           ts_rank(search_vector, websearch_to_tsquery('english', :q)) AS rank_score
                     FROM court_rule_sections
                     WHERE court_identity_id = :cid
                       AND chapter_number = ANY(:ch)
                       AND search_vector @@ websearch_to_tsquery('english', :q)
-                    ORDER BY rank
+                    ORDER BY rank_score DESC
                     LIMIT 10
                 """
                 vec_rows, kw_rows = await asyncio.gather(
                     _exec_raw(engine, vector_sql, {"q_vec": str(vec_list), "cid": court_identity_id, "ch": optional_chapters}),
                     _exec_raw(engine, keyword_sql, {"q": query, "cid": court_identity_id, "ch": optional_chapters}),
                 )
-                sem_ranks = {r.id: r.rank for r in vec_rows}
-                kw_ranks  = {r.id: r.rank  for r in kw_rows}
+                sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
+                kw_ranks  = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
                 all_ids   = set(sem_ranks) | set(kw_ranks)
                 row_data  = {r.id: r for r in list(vec_rows) + list(kw_rows)}
 
@@ -838,9 +835,19 @@ async def rerank_candidates(
     if not use_cross_encoder:
         # Fast path: use existing RRF score. 
         # RRF scores are typically ~0.04 for high relevance. Multiply by 100 to map to the 0-5 scale the UI expects.
-        for c in candidates:
-            c["rerank_score"] = c.get("score", 0.0) * 100
-        return candidates[:top_k]
+        candidates = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
+        filtered = []
+        if candidates:
+            max_score = candidates[0].get("score", 0.0)
+            for c in candidates:
+                s = c.get("score", 0.0)
+                if s < 0.015:  # Absolute noise cutoff
+                    continue
+                if s < max_score * 0.5:  # Relative drop-off (50% drop from the best result)
+                    continue
+                c["rerank_score"] = s * 100
+                filtered.append(c)
+        return filtered[:top_k]
 
     # Cross-encoder path (enabled for citation suggestion)
     try:
@@ -856,7 +863,19 @@ async def rerank_candidates(
         for i, c in enumerate(candidates):
             c["rerank_score"] = float(scores[i])
         reranked = sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
-        return reranked[:top_k]
+        
+        filtered = []
+        if reranked:
+            max_score = reranked[0].get("rerank_score", 0.0)
+            for c in reranked:
+                s = c.get("rerank_score", 0.0)
+                # Cross encoder scores are usually logits (e.g. -10 to +10).
+                # Removed absolute cutoff because logits can be negative even for the best match.
+                if s < max_score - 3.0:  # Relative drop-off for logits
+                    continue
+                filtered.append(c)
+                
+        return filtered[:top_k]
     except Exception as e:
         print(f"[reranker] Cross-encoder error: {e} — falling back to RRF order")
         return candidates[:top_k]

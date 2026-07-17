@@ -184,7 +184,7 @@ async def _rag_stream(req: GenerateRequest):
         # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
         yield "event: status\ndata: Reranking results...\n\n"
         top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=5)
-        top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=5)
+        top_statutes   = await rerank_candidates(combined_query, merged_statutes[:15], top_k=5, use_cross_encoder=True)
 
     # ── Stage 5: Context Assembly ────────────────────────────────────────
     # Retrieve court-specific procedural rules (AHC or other specific courts)
