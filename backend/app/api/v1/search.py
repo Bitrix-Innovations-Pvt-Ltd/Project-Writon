@@ -31,9 +31,10 @@ async def get_model() -> SentenceTransformer:
                 print("Loading Legal-BERT for API…")
                 # run_in_executor keeps the blocking I/O off the event loop
                 loop = asyncio.get_event_loop()
+                import torch
                 _model = await loop.run_in_executor(
                     None,
-                    lambda: SentenceTransformer("nlpaueb/legal-bert-base-uncased"),
+                    lambda: SentenceTransformer("nlpaueb/legal-bert-base-uncased", device="cpu", model_kwargs={"dtype": torch.float32}),
                 )
                 print("Legal-BERT loaded.")
     return _model
