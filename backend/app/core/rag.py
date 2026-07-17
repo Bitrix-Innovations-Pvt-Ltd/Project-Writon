@@ -60,15 +60,14 @@ _DOC_TYPE_CASE_TYPES: dict = {
     "writ_petition":          ["Writ Petition", "Civil Appeal", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Review Petition", "Curative Petition", "Original Suit", "Appeal", "Slp"],
 }
 
-# Maps document_type_key → preferred statute short_codes
 _DOC_TYPE_STATUTE_CODES: dict = {
-    "writ_petition_civil":    ["COI", "CPC", "SRA"],
-    "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS"],
-    "bail_application":       ["CrPC", "BNSS", "IPC", "BNS"],
-    "anticipatory_bail":      ["CrPC", "BNSS"],
-    "civil_appeal":           ["CPC", "COI"],
-    "criminal_appeal":        ["CrPC", "BNSS", "IPC", "BNS"],
-    "writ_petition":          ["COI", "CPC", "CrPC", "BNSS"],
+    "writ_petition_civil":    ["COI", "CPC", "SRA", "BSA"],
+    "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS", "BSA"],
+    "bail_application":       ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
+    "anticipatory_bail":      ["CrPC", "BNSS", "BSA"],
+    "civil_appeal":           ["CPC", "COI", "BSA"],
+    "criminal_appeal":        ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
+    "writ_petition":          ["COI", "CPC", "CrPC", "BNSS", "BSA"],
 }
 
 # Keyword-based overrides for subject matter
@@ -120,7 +119,7 @@ def _get_ts_config(query: str) -> str:
     (IPC, CrPC, BNSS etc.) are not stripped by the 'english' stop-word list.
     """
     abbrevs = {"IPC", "BNS", "CRPC", "BNSS", "COI", "SCC", "AIR",
-               "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI"}
+               "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "BSA"}
     words = query.strip().upper().split()
     if any(w in abbrevs for w in words) or len(words) <= 3:
         return "simple"
@@ -416,12 +415,12 @@ async def retrieve_judgment_chunks(
                            j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                            COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
                                || SUBSTRING(jc.chunk_text, 1, 1200) AS chunk_text,
-                           ROW_NUMBER() OVER (ORDER BY jc.embedding <-> :q_vec) AS rank
+                           jc.embedding <-> :q_vec AS distance
                     FROM   judgment_chunks jc
                     JOIN   judgments j ON j.id = jc.judgment_id
                     WHERE  jc.embedding IS NOT NULL
                     {ct_filter_sql}
-                    ORDER  BY rank
+                    ORDER  BY distance
                     LIMIT  30
                 """
             else:
@@ -432,11 +431,11 @@ async def retrieve_judgment_chunks(
                            j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                            COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
                                || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                           ROW_NUMBER() OVER (ORDER BY j.embedding <-> :q_vec) AS rank
+                           j.embedding <-> :q_vec AS distance
                     FROM   judgments j
                     WHERE  j.embedding IS NOT NULL
                     {ct_filter_sql}
-                    ORDER  BY rank
+                    ORDER  BY distance
                     LIMIT  30
                 """
 
@@ -447,22 +446,20 @@ async def retrieve_judgment_chunks(
                        j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                        COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
                            || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                       ROW_NUMBER() OVER (
-                           ORDER BY ts_rank(j.search_vector,
-                                            to_tsquery('{ts_config}',
-                                                regexp_replace(
-                                                    websearch_to_tsquery('{ts_config}', :q)::text,
-                                                    ' & ', ' | ', 'g'
-                                                )
-                                            )
-                                           ) DESC
-                       ) AS rank
+                       ts_rank(j.search_vector,
+                           to_tsquery('{{ts_config}}',
+                               regexp_replace(
+                                   websearch_to_tsquery('{{ts_config}}', :q)::text,
+                                   ' & ', ' | ', 'g'
+                               )
+                           )
+                       ) AS rank_score
                 FROM   judgments j
-                WHERE  j.search_vector @@ websearch_to_tsquery('{ts_config}', :q)
-                {ct_filter_sql}
-                ORDER  BY rank
+                WHERE  j.search_vector @@ websearch_to_tsquery('{{ts_config}}', :q)
+                {{ct_filter_sql}}
+                ORDER  BY rank_score DESC
                 LIMIT  30
-            """
+            """.format(ts_config=ts_config, ct_filter_sql=ct_filter_sql)
 
             vec_params = {"q_vec": str(vec_list), **params_shared}
             kw_params  = {"q": query, **params_shared}
@@ -472,6 +469,46 @@ async def retrieve_judgment_chunks(
                     _exec_raw(engine, vector_sql, vec_params),
                     _exec_raw(engine, keyword_sql, kw_params)
                 )
+
+                # ── Typo / Concept OR Fallback ────────────────────────────────
+                if len(kw_rows) < 5:
+                    import re
+                    words = [w for w in re.split(r'\W+', query) if len(w) > 2]
+                    if len(words) > 1:
+                        or_query = " | ".join(words)
+                        if USE_CHUNKS:
+                            fallback_sql = f"""
+                                SELECT jc.id AS chunk_id,
+                                       jc.judgment_id AS id,
+                                       j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                                       COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                                           || SUBSTRING(jc.chunk_text, 1, 1200) AS chunk_text,
+                                       ts_rank_cd(jc.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                                FROM   judgment_chunks jc
+                                JOIN   judgments j ON j.id = jc.judgment_id
+                                WHERE  jc.search_vector @@ to_tsquery('{ts_config}', :or_q)
+                                {ct_filter_sql}
+                                ORDER  BY rank_score DESC
+                                LIMIT  30
+                            """
+                        else:
+                            fallback_sql = f"""
+                                SELECT j.id,
+                                       j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                                       COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                                           || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
+                                       ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                                FROM   judgments j
+                                WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
+                                {ct_filter_sql}
+                                ORDER  BY rank_score DESC
+                                LIMIT  30
+                            """
+                        try:
+                            kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})
+                        except Exception as fallback_err:
+                            print(f"[retrieve_judgment_chunks] OR Fallback SQL error: {fallback_err}")
+
             except Exception as sql_err:
                 print(f"[retrieve_judgments] SQL error for query '{query}': {sql_err}")
                 # Fallback: run vector-only
@@ -479,8 +516,8 @@ async def retrieve_judgment_chunks(
                 kw_rows = []
 
             # ── RRF fusion ──────────────────────────────────────────────
-            sem_ranks = {r.id: r.rank for r in vec_rows}
-            kw_ranks  = {r.id: r.rank for r in kw_rows}
+            sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
+            kw_ranks  = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
             all_ids   = set(sem_ranks) | set(kw_ranks)
             row_data  = {r.id: r for r in (list(vec_rows) + list(kw_rows))}
 
@@ -548,27 +585,25 @@ async def retrieve_statutes(
 
             vector_sql = f"""
                 SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
-                       ROW_NUMBER() OVER (ORDER BY lcs.embedding <-> :q_vec) AS rank
+                       lcs.embedding <-> :q_vec AS distance
                 FROM   legal_code_sections lcs
                 JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
                 WHERE  lcs.embedding IS NOT NULL {code_filter_sql}
-                ORDER  BY rank
+                ORDER  BY distance
                 LIMIT  30
             """
 
             ts_config = _get_ts_config(query)
             keyword_sql = f"""
                 SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
-                       ROW_NUMBER() OVER (
-                           ORDER BY ts_rank(lcs.search_vector,
-                                            websearch_to_tsquery('{ts_config}', :q)) DESC
-                       ) AS rank
+                       ts_rank(lcs.search_vector,
+                                        websearch_to_tsquery('{{ts_config}}', :q)) AS rank_score
                 FROM   legal_code_sections lcs
                 JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
-                WHERE  lcs.search_vector @@ websearch_to_tsquery('{ts_config}', :q) {code_filter_sql}
-                ORDER  BY rank
+                WHERE  lcs.search_vector @@ websearch_to_tsquery('{{ts_config}}', :q) {{code_filter_sql}}
+                ORDER  BY rank_score DESC
                 LIMIT  30
-            """
+            """.format(ts_config=ts_config, code_filter_sql=code_filter_sql)
 
             vec_params = {"q_vec": str(vec_list), **code_params}
             kw_params  = {"q": query, **code_params}
@@ -578,6 +613,26 @@ async def retrieve_statutes(
                     _exec_raw(engine, vector_sql, vec_params),
                     _exec_raw(engine, keyword_sql, kw_params)
                 )
+                
+                # ── Typo / Concept OR Fallback ────────────────────────────────
+                if len(kw_rows) < 5:
+                    import re
+                    words = [w for w in re.split(r'\W+', query) if len(w) > 2]
+                    if len(words) > 1:
+                        or_query = " | ".join(words)
+                        fallback_sql = f"""
+                            SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
+                                   ts_rank_cd(lcs.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                            FROM   legal_code_sections lcs
+                            JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+                            WHERE  lcs.search_vector @@ to_tsquery('{ts_config}', :or_q) {code_filter_sql}
+                            ORDER  BY rank_score DESC
+                            LIMIT  30
+                        """
+                        try:
+                            kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **code_params})
+                        except Exception as fallback_err:
+                            print(f"[retrieve_statutes] OR Fallback SQL error: {fallback_err}")
             except Exception as sql_err:
                 print(f"[retrieve_statutes] SQL error for query '{query}': {sql_err}")
                 vec_rows = await _exec_raw(engine, vector_sql, vec_params)
@@ -943,7 +998,7 @@ async def verify_citations(draft_text: str, engine) -> list:
     # Match patterns like (2019) 4 SCC 123
     case_pattern = re.compile(r'\(\d{4}\)\s*\d+\s*SCC\s*\d+')
     # Match patterns like Section 302 IPC / Section 21 BNS
-    section_pattern = re.compile(r'Section\s*\d+[A-Z]?\s*(?:of\s*(?:the\s*)?)?(?:IPC|BNS|CrPC|BNSS|COI|SRA|CPC)')
+    section_pattern = re.compile(r'Section\s*\d+[A-Z]?\s*(?:of\s*(?:the\s*)?)?(?:IPC|BNS|CrPC|BNSS|COI|SRA|CPC|BSA)')
 
     for citation in set(case_pattern.findall(draft_text)):
         try:
@@ -959,7 +1014,7 @@ async def verify_citations(draft_text: str, engine) -> list:
 
     for citation in set(section_pattern.findall(draft_text)):
         sec_match  = re.search(r'(\d+[A-Z]?)', citation)
-        code_match = re.search(r'(IPC|BNS|CrPC|BNSS|COI|SRA|CPC)', citation)
+        code_match = re.search(r'(IPC|BNS|CrPC|BNSS|COI|SRA|CPC|BSA)', citation)
         if sec_match and code_match:
             try:
                 async with engine.connect() as conn:

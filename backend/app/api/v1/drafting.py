@@ -156,9 +156,16 @@ async def _rag_stream(req: GenerateRequest):
 
         try:
             embedding_fn = await _get_embedding_fn()
-            judgment_task = retrieve_judgment_chunks(engine, queries, embedding_fn)
-            statute_task  = retrieve_statutes(engine, queries, embedding_fn)
-            coi_task      = retrieve_statutes(engine, queries, embedding_fn, coi_only=True)
+            
+            # OPTIMIZATION: Batch compute all vectors once instead of 21 sequential runs
+            loop = asyncio.get_event_loop()
+            from app.core.rag import _cpu_executor
+            vecs = await loop.run_in_executor(_cpu_executor, embedding_fn, queries)
+            query_vectors = {q: (v.tolist() if hasattr(v, "tolist") else list(v)) for q, v in zip(queries, vecs)}
+
+            judgment_task = retrieve_judgment_chunks(engine, queries, query_vectors=query_vectors)
+            statute_task  = retrieve_statutes(engine, queries, query_vectors=query_vectors)
+            coi_task      = retrieve_statutes(engine, queries, coi_only=True, query_vectors=query_vectors)
 
             judgment_results, statute_results, coi_results = await asyncio.gather(
                 judgment_task, statute_task, coi_task
@@ -317,14 +324,11 @@ async def suggest_citations(req: GenerateRequest):
     try:
         embedding_fn = await _get_embedding_fn()
         
-        # Pre-calculate embeddings sequentially to avoid thread pool thrashing (21x concurrent runs)
-        # This drastically reduces CPU load and prevents timeouts.
+        # OPTIMIZATION: Batch compute all vectors once instead of sequentially
         from app.core.rag import _cpu_executor
-        query_vectors = {}
         loop = asyncio.get_event_loop()
-        for q in queries:
-            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, q)
-            query_vectors[q] = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+        vecs = await loop.run_in_executor(_cpu_executor, embedding_fn, queries)
+        query_vectors = {q: (v.tolist() if hasattr(v, "tolist") else list(v)) for q, v in zip(queries, vecs)}
 
         judgment_task = retrieve_judgment_chunks(
             engine, queries, None,

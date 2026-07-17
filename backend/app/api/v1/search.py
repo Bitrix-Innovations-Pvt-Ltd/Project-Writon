@@ -58,7 +58,7 @@ async def _exec_query(sql: str, params: dict) -> list:
 
 
 _LEGAL_ABBREVS = {"IPC", "BNS", "CRPC", "BNSS", "COI", "SCC", "AIR",
-                  "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "PMLA"}
+                  "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "PMLA", "BSA"}
 
 def _get_ts_config(query: str) -> str:
     words = query.strip().upper().split()
@@ -70,6 +70,8 @@ LEGAL_EXPANSIONS = {
     "IPC": "Indian Penal Code",
     "CrPC": "Code of Criminal Procedure",
     "BNSS": "Bharatiya Nagarik Suraksha Sanhita",
+    "BNS": "Bharatiya Nyaya Sanhita",
+    "BSA": "Bharatiya Sakshya Adhiniyam",
     "CPC": "Code of Civil Procedure",
     "NI Act": "Negotiable Instruments Act",
     "POCSO": "Protection of Children from Sexual Offences",

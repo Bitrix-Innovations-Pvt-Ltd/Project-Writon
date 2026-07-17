@@ -85,7 +85,7 @@ export default function JudgmentDetailPage() {
 
       // Bold important acts like Constitution of India, IPC, etc.
       let formattedPara = para;
-      const acts = ['Constitution of India', 'Indian Penal Code', 'Code of Criminal Procedure'];
+      const acts = ['Constitution of India', 'Indian Penal Code', 'Code of Criminal Procedure', 'Bharatiya Nyaya Sanhita', 'Bharatiya Nagarik Suraksha Sanhita', 'Bharatiya Sakshya Adhiniyam'];
       acts.forEach((act) => {
         if (formattedPara.includes(act)) {
           formattedPara = formattedPara.replace(
