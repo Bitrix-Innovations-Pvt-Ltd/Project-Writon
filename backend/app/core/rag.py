@@ -130,14 +130,15 @@ def _derive_statute_codes(document_type_key: str, subject_matter: str = "") -> l
     """Return preferred statute short_codes for this document type and subject matter."""
     codes = list(_DOC_TYPE_STATUTE_CODES.get(document_type_key, []))
     sm_lower = subject_matter.lower() if subject_matter else ""
-
-    # Add COI only when the subject matter actually touches constitutional provisions
-    if "COI" not in codes and any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI):
+    
+    # Add COI when the subject matter actually touches constitutional provisions
+    # OR when it's a service matter, as Writ Petitions for service matters rely heavily on COI (Art 14, 16, 226, 309, 311)
+    needs_coi = any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI)
+    is_service = any(kw in sm_lower for kw in _SUBJECT_SERVICE_LAW_KEYWORDS)
+    
+    if "COI" not in codes and (needs_coi or is_service):
         codes.append("COI")
 
-    # For service/pay matters — keep codes as-is (no broad edu statutes)
-    # This intentionally does NOT add COI for pure service matters unless
-    # a constitutional article is explicitly mentioned in subject_matter
     return codes
 
 
