@@ -61,9 +61,10 @@ _DOC_TYPE_CASE_TYPES: dict = {
 }
 
 _DOC_TYPE_STATUTE_CODES: dict = {
-    # COI intentionally removed from writ_petition_civil default —
-    # it is added back selectively by _derive_statute_codes() based on subject_matter
-    "writ_petition_civil":    ["CPC", "SRA", "BSA"],
+    # COI is now included by default because a Writ Petition is fundamentally constitutional,
+    # and diverse subject matters (like Elections, Tenders, Mining) will need to fall back to COI 
+    # if their specific statutes are not seeded in the database.
+    "writ_petition_civil":    ["COI", "CPC", "SRA", "BSA"],
     "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "bail_application":       ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "anticipatory_bail":      ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
