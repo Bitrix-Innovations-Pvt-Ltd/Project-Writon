@@ -60,17 +60,14 @@ _DOC_TYPE_CASE_TYPES: dict = {
     "writ_petition":          ["Writ Petition", "Civil Appeal", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Review Petition", "Curative Petition", "Original Suit", "Appeal", "Slp"],
 }
 
-_DOC_TYPE_STATUTE_CODES: dict = {
-    # COI is now included by default because a Writ Petition is fundamentally constitutional,
-    # and diverse subject matters (like Elections, Tenders, Mining) will need to fall back to COI 
-    # if their specific statutes are not seeded in the database.
-    "writ_petition_civil":    ["COI", "CPC", "SRA", "BSA"],
-    "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS", "BSA"],
-    "bail_application":       ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
-    "anticipatory_bail":      ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
-    "civil_appeal":           ["CPC", "COI", "BSA"],
-    "criminal_appeal":        ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
-    "writ_petition":          ["COI", "CPC", "CrPC", "BNSS", "BSA"],
+_DOC_TYPE_DOMAINS: dict = {
+    "writ_petition_civil":    ["civil", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
+    "writ_petition_criminal": ["criminal", "evidence", "procedure", "constitutional"],
+    "bail_application":       ["criminal", "evidence", "procedure"],
+    "anticipatory_bail":      ["criminal", "evidence", "procedure"],
+    "civil_appeal":           ["civil", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
+    "criminal_appeal":        ["criminal", "evidence", "procedure", "constitutional"],
+    "writ_petition":          ["civil", "criminal", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
 }
 
 # Subject-matter keywords that warrant adding COI to statute retrieval
@@ -127,20 +124,20 @@ def _derive_case_type_filter(document_type_key: str, subject_matter: str) -> lis
     return base
 
 
-def _derive_statute_codes(document_type_key: str, subject_matter: str = "") -> list:
-    """Return preferred statute short_codes for this document type and subject matter."""
-    codes = list(_DOC_TYPE_STATUTE_CODES.get(document_type_key, []))
+def _derive_statute_domains(document_type_key: str, subject_matter: str = "") -> list:
+    """Return preferred statute domains for this document type and subject matter."""
+    domains = list(_DOC_TYPE_DOMAINS.get(document_type_key, []))
     sm_lower = subject_matter.lower() if subject_matter else ""
     
-    # Add COI when the subject matter actually touches constitutional provisions
-    # OR when it's a service matter, as Writ Petitions for service matters rely heavily on COI (Art 14, 16, 226, 309, 311)
+    # Add constitutional domain when the subject matter actually touches constitutional provisions
+    # OR when it's a service matter, as Writ Petitions for service matters rely heavily on COI
     needs_coi = any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI)
     is_service = any(kw in sm_lower for kw in _SUBJECT_SERVICE_LAW_KEYWORDS)
     
-    if "COI" not in codes and (needs_coi or is_service):
-        codes.append("COI")
+    if "constitutional" not in domains and (needs_coi or is_service):
+        domains.append("constitutional")
 
-    return codes
+    return domains
 
 
 def _get_ts_config(query: str) -> str:
@@ -892,17 +889,18 @@ async def retrieve_statutes(
     sem_weight = 1.5 if context == "citations" else 1.0
     kw_weight  = 1.5 if context == "citations" else 2.0
 
-    # Build statute code filter
+    # Build domain filter
     code_filter_sql = ""
     code_params: dict = {}
     if coi_only:
         code_filter_sql = " AND lcs.legal_code_id = 7"
     elif document_type_key and context == "citations":
-        # Pass subject_matter so COI is only included when constitutionally relevant
-        relevant_codes = _derive_statute_codes(document_type_key, subject_matter)
-        if relevant_codes:
-            code_filter_sql = " AND lc.short_code = ANY(:statute_codes)"
-            code_params["statute_codes"] = relevant_codes
+        # Pass subject_matter so constitutional domain is included when relevant
+        relevant_domains = _derive_statute_domains(document_type_key, subject_matter)
+        if relevant_domains:
+            # PostgreSQL array overlap operator &&
+            code_filter_sql = " AND lc.domains && cast(:allowed_domains as varchar[])"
+            code_params["allowed_domains"] = relevant_domains
 
     for query in queries:
         try:

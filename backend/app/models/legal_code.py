@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Integer, BigInteger, ForeignKey, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import TSVECTOR, ARRAY
 from pgvector.sqlalchemy import Vector
 from app.core.database import Base
 
@@ -12,6 +12,7 @@ class LegalCode(Base):
     year_enacted = Column(Integer)
     status = Column(String, default="active")
     replaced_by_id = Column(BigInteger, ForeignKey("legal_codes.id"))
+    domains = Column(ARRAY(String), default=list)
 
 class LegalCodeSection(Base):
     __tablename__ = "legal_code_sections"
