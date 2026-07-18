@@ -27,6 +27,7 @@ from app.core.rag import (
     assemble_prompt,
     verify_citations,
     get_openrouter_client,
+    _SUBJECT_NEEDS_COI,
 )
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -163,13 +164,33 @@ async def _rag_stream(req: GenerateRequest):
             vecs = await loop.run_in_executor(_cpu_executor, embedding_fn, queries)
             query_vectors = {q: (v.tolist() if hasattr(v, "tolist") else list(v)) for q, v in zip(queries, vecs)}
 
-            judgment_task = retrieve_judgment_chunks(engine, queries, query_vectors=query_vectors)
-            statute_task  = retrieve_statutes(engine, queries, query_vectors=query_vectors)
-            coi_task      = retrieve_statutes(engine, queries, coi_only=True, query_vectors=query_vectors)
+            judgment_task = retrieve_judgment_chunks(
+                engine, queries,
+                document_type_key=req.document_type_key or "",
+                subject_matter=req.subject_matter,
+                query_vectors=query_vectors
+            )
+            statute_task  = retrieve_statutes(
+                engine, queries,
+                document_type_key=req.document_type_key or "",
+                subject_matter=req.subject_matter,
+                query_vectors=query_vectors
+            )
+            # Bug 6: only retrieve COI sections when the subject matter is
+            # constitutionally relevant — prevents education/panchayat Article noise.
+            sm_lower_check = req.subject_matter.lower() if req.subject_matter else ""
+            needs_coi = any(kw in sm_lower_check for kw in _SUBJECT_NEEDS_COI)
+            coi_task = (
+                retrieve_statutes(engine, queries, coi_only=True, query_vectors=query_vectors)
+                if needs_coi else asyncio.sleep(0)  # no-op coroutine
+            )
 
             judgment_results, statute_results, coi_results = await asyncio.gather(
                 judgment_task, statute_task, coi_task
             )
+            # coi_results is [] when coi_task was the no-op asyncio.sleep(0)
+            if not isinstance(coi_results, list):
+                coi_results = []
             # Merge statutes + COI (deduplicate by id)
             seen_ids = set()
             merged_statutes = []
@@ -340,6 +361,7 @@ async def suggest_citations(req: GenerateRequest):
         statute_task  = retrieve_statutes(
             engine, queries, None,
             document_type_key=req.document_type_key,
+            subject_matter=req.subject_matter,
             context="citations",
             query_vectors=query_vectors
         )

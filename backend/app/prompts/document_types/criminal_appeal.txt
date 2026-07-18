@@ -16,7 +16,7 @@ STRUCTURE RULES (apply strictly):
 {% endif %}
 
 {% if body_paras %}
-MANDATORY PARAGRAPHS (Body):
+MANDATORY PARAGRAPHS (Body) — EVERY item below MUST appear as its own numbered paragraph in the main petition. Do NOT skip, merge, condense, or omit any item:
 {% for para in body_paras %}
 - {{ para.instruction }}
 {% endfor %}
@@ -26,7 +26,9 @@ MANDATORY PARAGRAPHS (Body):
 DOCUMENT TYPE: {{ doc_type }} for {{ court_display }}
 
 {% if court_rules_block %}
+<<FORMATTING_INSTRUCTIONS_ONLY — DO NOT REPRODUCE IN DOCUMENT — FOR YOUR SILENT REFERENCE ONLY>>
 {{ court_rules_block }}
+<<END_FORMATTING_INSTRUCTIONS>>
 
 {% endif %}
 CASE DETAILS (Criminal Appeal):
@@ -49,7 +51,7 @@ DATES AND EVENTS (reproduce ALL rows VERBATIM in the LIST_OF_DATES section as a 
 GROUNDS OF APPEAL (user-provided):
 {{ form_data.grounds | default('Not provided — draft standard criminal appeal grounds') }}
 
-RELIEF SOUGHT:
+RELIEF SOUGHT (reproduce VERBATIM and IN FULL in the Prayer clause — do NOT omit, paraphrase, or truncate any detail including qualifying phrases):
 {{ form_data.relief_sought }}
 
 INTERIM RELIEF (Suspension of Sentence / Bail pending appeal):
@@ -82,4 +84,4 @@ REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTI
 7. VAKALATNAMA
 8. ANNEXURES
 
-Begin drafting now.
+⚠️ FINAL REMINDER BEFORE DRAFTING: Every paragraph in SYNOPSIS and MEMORANDUM_OF_APPEAL MUST start with its sequential number (1. 2. 3. …). No paragraph may appear without a number. Grounds use A. B. C. — not numbers. Begin drafting now.

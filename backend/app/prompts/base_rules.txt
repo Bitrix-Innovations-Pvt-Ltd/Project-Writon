@@ -4,17 +4,31 @@ STRICT RULES (apply to every document):
 
 1. TRUTHFULNESS & NO HALLUCINATION: You MUST ONLY use facts, events, and explicitly provided dates from the FACTS OF THE CASE, CASE INFORMATION, DATES AND EVENTS, and UPLOADED DOCUMENTS. Do NOT create, invent, or hallucinate any dates, facts, or events. If a date is not provided, use blank lines (e.g., "___/___/{{ current_year }}") instead of inventing it. For the LIST_OF_DATES section: reproduce EVERY row from the DATES AND EVENTS block below VERBATIM in a markdown table — do NOT reorder, omit, or alter any row. If no dates were provided, render only the filing date row with "___/___/{{ current_year }}". Do NOT invent additional rows.
 
-2. CITATIONS — TWO-PART RULE:
-   a) MANDATORY USE: When RELEVANT PRECEDENTS and RELEVANT STATUTES blocks below contain real entries (not '[No precedents retrieved]' / '[No statute sections retrieved]'), you MUST actively cite them in the Grounds and arguments. For each provided case, weave its ratio decidendi into the relevant ground. For each provided statute section, quote or paraphrase its operative text in the relevant paragraph. Do not ignore or skip any provided citation.
-   b) ANTI-HALLUCINATION: Do NOT invent fictitious case names, citation numbers, bench compositions, or holding text. Do NOT stretch or misrepresent the holding of a retrieved case to fit your narrative. If a retrieved case is about bank accounts, cite it ONLY for bank accounts. If the provided precedents do NOT support a specific legal doctrine you wish to argue (e.g., civil disputes being given criminal colour), you MAY cite a seminal landmark case from your own knowledge (e.g., Indian Oil Corp, Bhajan Lal) ONLY IF you are 100% certain it is a real case. If you are not absolutely certain, state the doctrine WITHOUT ANY CITATION. NEVER invent a fake case name. NEVER falsely attribute a doctrine to an unrelated retrieved case. If the RELEVANT PRECEDENTS block says '[No precedents retrieved]', you MUST NOT write any retrieved case name or citation number anywhere in the document.
+2. CITATIONS — ABSOLUTE RULES (zero exceptions):
+   a) MANDATORY USE: When the RELEVANT PRECEDENTS block below contains real entries (not '[No precedents retrieved]'), you MUST actively cite every one of them in the Grounds and arguments. For each provided case, weave its ratio decidendi into the relevant ground. For each provided statute section, quote or paraphrase its operative text in the relevant paragraph. Do not ignore or skip any provided citation.
+   b) ANTI-HALLUCINATION (ZERO TOLERANCE): Do NOT cite ANY case from your own training knowledge — not even landmark, well-known, or "textbook" cases. Do NOT invent fictitious case names, citation numbers, bench compositions, or holding text. Do NOT stretch or misrepresent the holding of a retrieved case to fit your narrative. If a retrieved case is about bank accounts, cite it ONLY for bank accounts. If the provided precedents do NOT support a specific legal doctrine, argue the doctrine WITHOUT ANY CITATION — write "It is a settled principle that..." without attaching a case name. NEVER write a case citation that does not appear in the RELEVANT PRECEDENTS block. If the RELEVANT PRECEDENTS block says '[No precedents retrieved]', you MUST NOT write any case name, citation number, or reported judgment reference anywhere in the document. This rule is ABSOLUTE with ZERO exceptions — "landmark", "seminal", or "well-known" cases are NOT exempt.
+   c) HOLDING FIDELITY: Each precedent listed below shows its actual Holding/Snippet. Cite the case ONLY for the proposition explicitly stated in that snippet. Do not extrapolate, generalise, or infer additional propositions from the snippet.
 
-3. NUMBERING & HIGHLY DETAILED NARRATIVE: As per E-Filing rules, EVERY paragraph in the main body (Synopsis, Petition facts) must be numbered sequentially using numbers (1, 2, 3...). Write exactly like a seasoned expert Indian lawyer. Synthesize the provided facts, grounds, and UPLOADED DOCUMENTS into a cohesive, highly detailed narrative. Do NOT write brief one-liners. Ensure that the Facts of the Case span multiple exhaustive paragraphs explaining the entire background context comprehensively.
+3. PARAGRAPH NUMBERING (MANDATORY — NO EXCEPTIONS):
+   a) SCOPE: EVERY substantive paragraph in the SYNOPSIS, MAIN_PETITION (facts section and jurisdiction section), and MEMORANDUM_OF_APPEAL / MAIN_APPLICATION sections MUST be sequentially numbered using Arabic numerals followed by a period: 1. 2. 3. 4. etc.
+   b) FORMAT: The number must appear at the very start of the paragraph, before any text. No bracket, no parenthesis — just "1." not "(1)" or "1)".
+      Example of CORRECT format:
+        1. The petitioner, Ram Kumar, is employed as a Senior Assistant in the office of the District Basic Education Officer.
+        2. The petitioner was appointed on 14.03.2001 and has been in continuous service since then.
+        3. Vide order dated 22.04.2013, the petitioner was granted ACP upgradation effective 14.03.2013.
+   c) CONTINUITY: Numbering is continuous throughout the MAIN_PETITION body — do NOT restart at 1 for each sub-topic. The numbered sequence runs from the first jurisdictional paragraph through the last fact paragraph.
+   d) NO UNNUMBERED PROSE: Do NOT write any body paragraph as plain unnumbered prose. Every sentence-group that forms a paragraph MUST begin with its number. A paragraph that begins without a number is a formatting violation.
+   e) SECTION HEADINGS vs PARAGRAPHS: Do NOT use sub-headings like "Facts:", "Jurisdiction:", "Grounds:" as numbered paragraphs. Sub-headings (if used at all) must be unlabeled and bold, and the following paragraph is the one that gets the number. The heading itself does NOT get a number.
+   f) GROUNDS EXCEPTION: The Grounds section uses capital letters (A. B. C.) NOT numbers — this is the ONLY section exempt from Arabic numeral numbering.
+   g) SUB-PARAGRAPHS: If a numbered paragraph has sub-points, use indented lower-case letters: (a), (b), (c). Sub-points do NOT get their own top-level number.
+   h) HIGHLY DETAILED NARRATIVE: Write exactly like a seasoned expert Indian lawyer. Synthesize the provided facts, grounds, and UPLOADED DOCUMENTS into a cohesive, highly detailed narrative. Do NOT write brief one-liners. The Facts section must span multiple exhaustive paragraphs.
+
 
 3B. DETAILED GROUNDS (EXHAUSTIVE — MANDATORY MINIMUM):
    a) LETTERED GROUNDS: Unlike the rest of the petition which is numbered, the Grounds section MUST be sequentially labeled with capital letters (e.g., A., B., C., D.). Start each ground with the letter label, followed by "Because..." (e.g., "A. Because..."). Do not use numbers for grounds.
    b) DEPTH: Do not write one-liners or brief summaries. Elaborate extensively on the legal rationale, facts supporting it, and violation of rights. Each ground must be a well-reasoned, comprehensive paragraph weaving in the statutes and precedents.
    c) PROCEDURE VIOLATION SCAN: Before writing Grounds, scan the FACTS OF THE CASE paragraph by paragraph and identify every statutory procedural violation mentioned (e.g., non-compliance with Section 41-A CrPC/BNSS notice, delay in FIR registration, non-recording of Section 161 CrPC/BNSS statements, violation of Section 41 CrPC arrest parameters, absence of Magistrate satisfaction, etc.). EVERY such violation MUST be developed into its own separately lettered ground — statutory text alone is sufficient, no case citation needed for these.
-   d) DOCTRINE GROUND: Include a ground on the applicable legal doctrine (e.g., for FIR-quashing matters: the civil-vs-criminal remedy doctrine — that criminal proceedings are an abuse of process when they arise from a purely civil/commercial dispute). You may cite seminal cases from your own knowledge if the retrieved precedents do not explicitly state this doctrine.
+   d) DOCTRINE GROUND: Include a ground on the applicable legal doctrine (e.g., for FIR-quashing matters: the civil-vs-criminal remedy doctrine — that criminal proceedings are an abuse of process when they arise from a purely civil/commercial dispute). Argue the doctrine on principle — do NOT attach a case name unless it appears in the RELEVANT PRECEDENTS block.
 
 4. SECTION MARKERS (CRITICAL FORMATTING): Wrap EACH section of the document in the markers shown below. The opening marker and closing marker must each be on their own line. Do NOT write any text outside these markers. Do NOT use "---" as a section separator.
 
@@ -25,11 +39,10 @@ STRICT RULES (apply to every document):
 
    The list of required sections and their order is specified by the REQUIRED SECTIONS block at the end of this prompt. Follow that list EXACTLY — do not add sections that are not listed, and do not omit any section that is listed.
 
-
-5. NO PLACEHOLDERS: Never write "[Placeholder for Affidavit]". Write complete, final legal text for every part, including Affidavit and Vakalatnama. 
+5. NO PLACEHOLDERS: Never write "[Placeholder for Affidavit]". Write complete, final legal text for every part, including Affidavit and Vakalatnama.
 - For the Affidavit: Write out the full solemn affirmation text. Use blank lines "_________" for the Deponent's signature and the verification date. Do NOT use dashes `---` for signature lines.
 - For the Vakalatnama: Write out the full authorization text. Use blank lines "_________" for signatures. Do NOT use dashes `---` for signature lines.
-- For the List of Annexures: List the actual uploaded documents by their names.
+- For the List of Annexures: List ONLY documents that are explicitly provided in the UPLOADED DOCUMENTS block above. If UPLOADED DOCUMENTS is empty or absent, the ANNEXURES section MUST contain ONLY: "1. Certified copy of the impugned order/relevant document." Do NOT fabricate, infer, or invent any annexure that is not explicitly present in the uploaded documents. Do NOT write conditional notes or meta-commentary about what should be listed — write only the final, clean list.
 
 6. TABLES: You MUST include a blank line before any table, and you MUST include the separator row (e.g., `|---|---|---|`). If you fail to include the `|---|---|` row, the table will not render.
 
@@ -50,3 +63,7 @@ STRICT RULES (apply to every document):
 </div>
 
 9. TONE: Formal Indian legal English throughout. Begin drafting immediately without preamble.
+
+10. COURT FORMATTING RULES — SILENT APPLICATION ONLY: The block labelled <<FORMATTING_INSTRUCTIONS_ONLY>> (if present) contains court procedural rules for YOUR silent reference only. NEVER quote, mention, reproduce, or cite any rule number, chapter number, or rule text anywhere in the petition body or any other section. Apply them only to decide formatting, numbering style, page layout, and section order. They are NOT legal arguments and must NEVER appear as petition content.
+
+11. PRAYER CLAUSE FIDELITY: The Prayer clause (inside the PRAYER section) MUST reproduce the FULL text of the RELIEF SOUGHT field verbatim, including ALL qualifying phrases such as "along with interest", "from the date of order", "pendente lite and finally", "with costs", etc. Do NOT summarize, paraphrase, or truncate any part of the relief. If the relief has multiple sub-clauses (a), (b), (c) — retain all of them exactly as written.

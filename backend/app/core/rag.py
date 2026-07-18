@@ -61,7 +61,9 @@ _DOC_TYPE_CASE_TYPES: dict = {
 }
 
 _DOC_TYPE_STATUTE_CODES: dict = {
-    "writ_petition_civil":    ["COI", "CPC", "SRA", "BSA"],
+    # COI intentionally removed from writ_petition_civil default —
+    # it is added back selectively by _derive_statute_codes() based on subject_matter
+    "writ_petition_civil":    ["CPC", "SRA", "BSA"],
     "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "bail_application":       ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "anticipatory_bail":      ["CrPC", "BNSS", "BSA"],
@@ -69,6 +71,22 @@ _DOC_TYPE_STATUTE_CODES: dict = {
     "criminal_appeal":        ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "writ_petition":          ["COI", "CPC", "CrPC", "BNSS", "BSA"],
 }
+
+# Subject-matter keywords that warrant adding COI to statute retrieval
+_SUBJECT_NEEDS_COI = [
+    "fundamental right", "article 14", "article 16", "article 19", "article 21",
+    "article 226", "article 32", "constitutional", "equality", "liberty",
+    "discrimination", "natural justice", "article 311", "article 300",
+]
+
+# Subject-matter keywords that warrant adding service-law related codes
+_SUBJECT_SERVICE_LAW_KEYWORDS = [
+    "service", "employment", "pay", "salary", "allowance", "promotion",
+    "acp", "assured career progression", "increment", "pension", "arrear",
+    "seniority", "transfer", "posting", "disciplinary", "dismissal",
+    "termination", "reinstatement", "back wage", "grade pay", "pay scale",
+    "pay fixation", "pay revision", "dpc", "department", "government employee",
+]
 
 # Keyword-based overrides for subject matter
 _SUBJECT_CASE_TYPE_OVERRIDES = [
@@ -108,9 +126,19 @@ def _derive_case_type_filter(document_type_key: str, subject_matter: str) -> lis
     return base
 
 
-def _derive_statute_codes(document_type_key: str) -> list:
-    """Return preferred statute short_codes for this document type."""
-    return list(_DOC_TYPE_STATUTE_CODES.get(document_type_key, []))
+def _derive_statute_codes(document_type_key: str, subject_matter: str = "") -> list:
+    """Return preferred statute short_codes for this document type and subject matter."""
+    codes = list(_DOC_TYPE_STATUTE_CODES.get(document_type_key, []))
+    sm_lower = subject_matter.lower() if subject_matter else ""
+
+    # Add COI only when the subject matter actually touches constitutional provisions
+    if "COI" not in codes and any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI):
+        codes.append("COI")
+
+    # For service/pay matters — keep codes as-is (no broad edu statutes)
+    # This intentionally does NOT add COI for pure service matters unless
+    # a constitutional article is explicitly mentioned in subject_matter
+    return codes
 
 
 def _get_ts_config(query: str) -> str:
@@ -186,7 +214,39 @@ async def rewrite_queries(
     # ── Build a rich, doc-type-aware hint covering all document types ─────
     doc_hint = ""
 
-    if "anticipatory bail" in doc_lower:
+    # ── NDPS Bail (Sec. 37 twin conditions) — checked BEFORE generic bail ──
+    if "ndps" in doc_lower or "37 ndps" in doc_lower or ("bail" in doc_lower and "ndps" in sm_lower):
+        doc_hint = (
+            "This is a bail application under Section 37 of the NDPS Act. "
+            "Ensure queries target: (a) Section 37 NDPS twin conditions — satisfaction that accused not guilty AND unlikely to commit offence, "
+            "(b) gravity of commercial-quantity charge vs small-quantity distinction, "
+            "(c) Section 20/21/22 NDPS Act — offence and punishment, "
+            "(d) landmark NDPS bail precedents: Union of India v Thamisharasi, Tofan Singh v State of Tamil Nadu, "
+            "Mohd. Muslim @ Hussain v State (NCT of Delhi)."
+        )
+    # ── PMLA Bail (Sec. 45 twin conditions) — checked BEFORE generic bail ──
+    elif "pmla" in doc_lower or "money laundering" in doc_lower or "ecir" in doc_lower or ("bail" in doc_lower and "pmla" in sm_lower):
+        doc_hint = (
+            "This is a bail application under Section 45 of the Prevention of Money Laundering Act, 2002. "
+            "Ensure queries target: (a) Section 45 PMLA twin conditions — reasonable grounds to believe not guilty AND not likely to commit offence, "
+            "(b) Section 3/4 PMLA — offence of money laundering and attachment, "
+            "(c) Enforcement Case Information Report (ECIR) vs FIR — arrest procedure, "
+            "(d) landmark PMLA bail precedents: Vijay Madanlal Choudhary v UOI, Pavana Dibbur v ED, "
+            "Pankaj Bansal v UOI (written grounds of arrest), P Chidambaram v ED."
+        )
+    # ── POCSO Bail / Charge framing ──────────────────────────────────────────
+    elif "pocso" in doc_lower or ("bail" in doc_lower and "pocso" in sm_lower) or "charge" in doc_lower:
+        doc_hint = (
+            "This is a POCSO-related application (bail / charge framing / discharge). "
+            "Ensure queries target: (a) POCSO Act Sections 7, 8, 9, 10 — penetrative / aggravated sexual assault, "
+            "(b) Section 29 POCSO — presumption of guilt, "
+            "(c) Section 439 CrPC / 483 BNSS bail alongside Section 37-A POCSO restrictions, "
+            "(d) charge framing standard — Section 228 CrPC / 251 BNSS prima facie test, "
+            "(e) discharge — Section 227 CrPC / 250 BNSS — no sufficient grounds, "
+            "(f) precedents: Alakh Alok Srivastava v UOI, Neeraj Sharma v State, State of MP v Madan Lal."
+        )
+    # ── Anticipatory Bail ─────────────────────────────────────────────────────
+    elif "anticipatory bail" in doc_lower:
         doc_hint = (
             "This is an anticipatory bail application. "
             "Ensure queries target: (a) Section 438 CrPC / Section 482 BNSS anticipatory bail grounds, "
@@ -249,10 +309,44 @@ async def rewrite_queries(
             "Ensure queries target: (a) scope of writ jurisdiction and alternative remedy doctrine, "
             "(b) the specific relief (mandamus, certiorari, prohibition, quo warranto), "
         )
-        if "service" in sm_lower or "employment" in sm_lower:
+        # ── Pay / ACP / Salary / Arrears (service pay matters) ──────────────
+        if any(kw in sm_lower for kw in ["pay", "salary", "acp", "assured career progression",
+                                          "grade pay", "pay scale", "arrear", "increment",
+                                          "pay fixation", "pay revision", "allowance"]):
+            doc_hint += (
+                "(c) ACP / MACP Assured Career Progression scheme — pay upgradation on completion of service years, "
+                "(d) pay fixation rules — Fundamental Rules, CCS (RP) Rules, Pay Commission recommendations, "
+                "(e) arrears release after non-implementation of a valid pay order — continuing cause of action doctrine, "
+                "(f) mandamus to implement unrevoked government pay / promotion order, "
+                "(g) limitation — State cannot set up laches when default is its own non-implementation of an order. "
+                "Key precedents: State of Punjab v Amar Nath Goyal, Shyam Babu Verma v UOI, "
+                "Bhupinder Singh v UOI, K Nagaraj v State of AP (pay protection), "
+                "State of AP v Sagar Ahuja (continuing wrong in service pay)."
+            )
+        # ── Pension ──────────────────────────────────────────────────────────
+        elif "pension" in sm_lower or "retiral" in sm_lower or "gratuity" in sm_lower:
+            doc_hint += (
+                "(c) pension rules — CCS Pension Rules, FR/SR, UGC/State pension schemes, "
+                "(d) commutation of pension, family pension, gratuity computation, "
+                "(e) right to pension as a vested right — not a bounty, "
+                "(f) mandamus to release withheld pension arrears."
+            )
+        # ── Promotion / Seniority / DPC ──────────────────────────────────────
+        elif any(kw in sm_lower for kw in ["promotion", "seniority", "dpc", "selection grade",
+                                            "time-bound", "time bound"]):
+            doc_hint += (
+                "(c) promotion criteria — DPC procedure, zone of consideration, roster system, "
+                "(d) seniority fixation rules, merit-cum-seniority vs pure seniority, "
+                "(e) Articles 14, 16 — equality in public employment, "
+                "(f) mandamus to convene DPC or implement promotion order."
+            )
+        # ── Reinstatement / Dismissal / Termination ──────────────────────────
+        elif any(kw in sm_lower for kw in ["service", "employment", "termination", "dismissal",
+                                            "reinstatement", "back wage"]):
             doc_hint += (
                 "(c) service law — Articles 14, 16, 311, natural justice in departmental inquiry, "
-                "(d) reinstatement, back wages, wrongful termination precedents."
+                "(d) reinstatement, back wages, wrongful termination precedents, "
+                "(e) All India Services Rules / Central Services Rules applicable."
             )
         elif "property" in sm_lower or "land" in sm_lower:
             doc_hint += (
@@ -287,20 +381,254 @@ async def rewrite_queries(
         else:
             doc_hint += f"(c) constitutional and statutory basis for the relief sought in {subject_matter}."
     elif "slp" in doc_lower or "special leave" in doc_lower:
+        # Subject-matter-aware SLP hints
+        slp_sm_hint = ""
+        if any(kw in sm_lower for kw in ["pay", "salary", "acp", "service", "employment",
+                                          "pension", "promotion", "seniority"]):
+            slp_sm_hint = (
+                "Focus specifically on: service law SLP — pay fixation, ACP/MACP arrears, "
+                "non-implementation of government order, Section 14/19 Administrative Tribunals Act, "
+                "maintainability of SLP after CAT/High Court, scope of Article 136 in service matters."
+            )
+        elif any(kw in sm_lower for kw in ["cheque", "negotiable instrument", "section 138"]):
+            slp_sm_hint = (
+                "Focus on: Section 138/141 Negotiable Instruments Act cheque dishonour, "
+                "legal notice period, Section 139 presumption, compounding under Section 147 NI Act, "
+                "SLP maintainability when concurrent findings on cheque dishonour."
+            )
+        elif any(kw in sm_lower for kw in ["arbitration", "section 11", "award", "section 34"]):
+            slp_sm_hint = (
+                "Focus on: Arbitration and Conciliation Act — Section 11 appointment, "
+                "Section 34 setting aside award, Section 37 appeal, scope of court interference in arbitral awards, "
+                "unstamped agreement — admissibility (NN Global, In Re: Interplay)."
+            )
+        elif any(kw in sm_lower for kw in ["land", "property", "acquisition", "revenue"]):
+            slp_sm_hint = (
+                "Focus on: land acquisition compensation, Section 24 Land Acquisition Act 2013 lapse, "
+                "adverse possession, Article 300-A right to property, mutation of revenue records."
+            )
+        elif any(kw in sm_lower for kw in ["tax", "income tax", "gst", "custom"]):
+            slp_sm_hint = (
+                "Focus on: Income Tax Act / GST Act assessment, reassessment, penalty provisions, "
+                "substantial question of law for SLP in tax matters, revenue vs capital expenditure, "
+                "Section 263/271 IT Act, refund and interest."
+            )
+        else:
+            slp_sm_hint = f"Underlying subject: {subject_matter}."
+
         doc_hint = (
-            "This is a Special Leave Petition under Article 136. "
-            "Ensure queries target: (a) Article 136 scope and limitations, "
-            "(b) interference with concurrent findings of fact by SC, "
-            f"(c) substantial question of law for SLP admission, (d) the underlying dispute: {subject_matter}."
+            "This is a Special Leave Petition under Article 136 of the Constitution. "
+            f"{slp_sm_hint} "
+            "Ensure queries target: (a) Article 136 scope — exceptional circumstances for interference, "
+            "(b) interference with concurrent findings of fact by the Supreme Court — perversity standard, "
+            "(c) substantial question of law required for SLP admission, "
+            "(d) the specific legal error in the impugned High Court judgment."
         )
-    elif "insolvency" in doc_lower or "ibc" in doc_lower or "nclt" in doc_lower:
+    elif "insolvency" in doc_lower or "ibc" in doc_lower or "nclt" in doc_lower or "winding" in doc_lower or "company petition" in doc_lower:
         doc_hint = (
-            "This is an insolvency / IBC petition. "
-            "Ensure queries target: (a) Section 7/9/10 IBC financial/operational creditor claims, "
-            "(b) CIRP initiation thresholds and timelines, "
-            "(c) moratorium under Section 14 IBC, "
-            "(d) NCLT/NCLAT jurisdiction and procedure."
+            "This is an insolvency / IBC / company petition. "
+            "Ensure queries target: (a) Section 7/9/10 IBC financial/operational creditor claims — default and initiation, "
+            "(b) CIRP initiation thresholds (Rs 1 crore), timelines and NCLT jurisdiction, "
+            "(c) moratorium under Section 14 IBC — effect on pending suits, "
+            "(d) Section 31 IBC resolution plan approval and Section 33 liquidation, "
+            "(e) NCLAT appellate jurisdiction under Section 61 IBC, "
+            "(f) pre-pack insolvency (PIRP), cross-border insolvency under Part Z IBC."
         )
+    # ── Contempt Petition ─────────────────────────────────────────────────────
+    elif "contempt" in doc_lower:
+        doc_hint = (
+            "This is a Contempt of Court petition. "
+            "Ensure queries target: (a) Contempt of Courts Act 1971 — civil contempt (wilful disobedience) vs criminal contempt, "
+            "(b) Section 2(b)/2(c) CoC Act — definition and elements of contempt, "
+            "(c) Article 129 (SC) / Article 215 (HC) — inherent power to punish contempt, "
+            "(d) wilful disobedience of court order — deliberate and intentional act, "
+            "(e) landmark contempt precedents: Re: Vinay Chandra Mishra, Prashant Bhushan contempt, "
+            "Baradakanta Mishra v Bhimsen Dixit."
+        )
+    # ── Transfer Petition ─────────────────────────────────────────────────────
+    elif "transfer" in doc_lower and "petition" in doc_lower:
+        doc_hint = (
+            "This is a Transfer Petition. "
+            "Ensure queries target: (a) Section 25 CPC / Section 406 CrPC — grounds for transfer, "
+            "(b) fair trial, apprehension of bias, convenience of parties as transfer grounds, "
+            "(c) matrimonial transfer petitions — Section 25 CPC, wife's convenience principle, "
+            "(d) Article 139-A Supreme Court transfer jurisdiction, "
+            "(e) landmark transfer precedents: Surinder Kaur v Harbax Singh, Anita Kushwaha v Pushap Sudan."
+        )
+    # ── Review Petition ───────────────────────────────────────────────────────
+    elif "review" in doc_lower and "petition" in doc_lower:
+        doc_hint = (
+            "This is a Review Petition. "
+            "Ensure queries target: (a) Order 47 Rule 1 CPC / Section 114 CPC — grounds for review, "
+            "(b) error apparent on the face of the record — narrow scope, "
+            "(c) new evidence discovered after judgment, "
+            "(d) review jurisdiction of Supreme Court under Article 137 / High Court under Article 226, "
+            "(e) precedents: Northern India Caterers v Lt. Governor Delhi, Haridas Das v Usha Rani Banik."
+        )
+    # ── Curative Petition ─────────────────────────────────────────────────────
+    elif "curative" in doc_lower:
+        doc_hint = (
+            "This is a Curative Petition. "
+            "Ensure queries target: (a) Rupa Hurra v Ashok Hurra — curative petition origin and grounds, "
+            "(b) violation of principles of natural justice — not heard before judgment, "
+            "(c) forum shopping / bias by judge, "
+            "(d) curative petition as last constitutional remedy after review dismissed, "
+            "(e) maintainability — certification by senior counsel, circulation before 3-judge bench."
+        )
+    # ── Civil Revision / Second Appeal ────────────────────────────────────────
+    elif "civil revision" in doc_lower or "second appeal" in doc_lower or "lpa" in doc_lower or "letters patent" in doc_lower:
+        doc_hint = (
+            "This is a Civil Revision / Second Appeal / Letters Patent Appeal. "
+            "Ensure queries target: (a) Section 115 CPC — revision jurisdiction — jurisdictional error, "
+            "(b) Section 100 CPC — second appeal — substantial question of law, "
+            "(c) Letters Patent Appeal — clause 10/15 — intra-court appeal against single judge, "
+            "(d) non-interference with concurrent findings of fact, perversity standard, "
+            "(e) substantial question of law — formulation at admission stage — Panchugopal Barua v Umesh Chandra Goswami."
+        )
+    # ── Original Suit (Article 131) ───────────────────────────────────────────
+    elif "131" in doc_lower or "original suit" in doc_lower or "inter-state" in doc_lower:
+        doc_hint = (
+            "This is an Original Suit / inter-State dispute under Article 131. "
+            "Ensure queries target: (a) Article 131 — exclusive original jurisdiction of SC in Centre-State or State-State disputes, "
+            "(b) legal right vs political question — justiciability, "
+            "(c) water disputes (Article 262 / Inter-State River Water Disputes Act), "
+            "(d) territorial boundary disputes, "
+            "(e) precedents: State of Karnataka v State of Tamil Nadu, State of Rajasthan v UOI."
+        )
+    # ── CAT / Service Matter Original Application ─────────────────────────────
+    elif "cat" in doc_lower or "administrative tribunal" in doc_lower or "original application" in doc_lower or ("service" in doc_lower and "tribunal" in doc_lower):
+        doc_hint = (
+            "This is a Service Matter Original Application before CAT / Administrative Tribunal. "
+            f"Subject: {subject_matter}. "
+            "Ensure queries target: (a) Administrative Tribunals Act 1985 — jurisdiction, procedure, Section 14/15/19, "
+            "(b) the specific service law violation: pay fixation, ACP/MACP, promotion, seniority, disciplinary proceedings, "
+            "(c) Articles 14, 16 — equality in public employment, "
+            "(d) limitation under Section 21 AT Act — continuing wrong doctrine for pay/allowance matters, "
+            "(e) mandamus to implement government order — laches cannot be pleaded by the defaulting authority."
+        )
+    # ── Motor Accident Claim Petition (MACT) ─────────────────────────────────
+    elif "motor accident" in doc_lower or "mact" in doc_lower or "motor vehicles" in doc_lower:
+        doc_hint = (
+            "This is a Motor Accident Claim Petition before MACT. "
+            "Ensure queries target: (a) Sections 140/163-A/166 Motor Vehicles Act — fault vs no-fault liability, "
+            "(b) structured formula (Second Schedule) vs Sarla Verma formula for compensation, "
+            "(c) multiplier method — loss of dependency, future prospects, non-pecuniary heads, "
+            "(d) insurer's liability — policy conditions, gratuitous passenger exclusion, "
+            "(e) precedents: National Insurance Co v Pranay Sethi, Sarla Verma v Delhi Transport Corp, "
+            "Rani Devi v Rajasthan State RTC."
+        )
+    # ── RERA / Real Estate ────────────────────────────────────────────────────
+    elif "rera" in doc_lower or "real estate" in doc_lower or "builder" in doc_lower or "developer" in doc_lower:
+        doc_hint = (
+            "This is a RERA / real estate complaint. "
+            "Ensure queries target: (a) RERA Act 2016 — Section 18 (failure to hand over possession), "
+            "Section 12 (false representation), Section 31 (complaint to authority), "
+            "(b) RERA Appellate Tribunal jurisdiction — Section 43 RERA, "
+            "(c) refund with interest (10.15%) — delay in possession, "
+            "(d) consumer forum vs RERA — concurrent jurisdiction, "
+            "(e) precedents: IREO Grace Realtech v Abhishek Khanna, Pioneer Urban Land v Govindan Raghavan."
+        )
+    # ── DRT / SARFAESI / Debt Recovery ───────────────────────────────────────
+    elif "drt" in doc_lower or "sarfaesi" in doc_lower or "debt recovery" in doc_lower or "rdba" in doc_lower:
+        doc_hint = (
+            "This is a Debt Recovery / SARFAESI application. "
+            "Ensure queries target: (a) SARFAESI Act 2002 — Section 13(2) notice, Section 13(4) possession, "
+            "Section 17 application to DRT, Section 18 appeal to DRAT, "
+            "(b) Recovery of Debts and Bankruptcy Act 1993 — DRT jurisdiction, certificate of recovery, "
+            "(c) Section 13(3A) SARFAESI — objection procedure and bank response obligation, "
+            "(d) wrongful possession / auction — procedural defects, "
+            "(e) precedents: United Bank of India v Satyawati Tondon, Mardia Chemicals v UOI."
+        )
+    # ── NGT / Environmental ───────────────────────────────────────────────────
+    elif "ngt" in doc_lower or "environment" in doc_lower or "environmental" in doc_lower or "green tribunal" in doc_lower:
+        doc_hint = (
+            "This is an NGT / environmental matter. "
+            "Ensure queries target: (a) NGT Act 2010 — Section 14/15/16 jurisdiction and compensation, "
+            "(b) Environment Protection Act 1986 / Water Act 1974 / Air Act 1981 — violation, "
+            "(c) precautionary principle, polluter pays principle, sustainable development, "
+            "(d) Environmental Impact Assessment (EIA) notification compliance, "
+            "(e) precedents: Sterlite Industries v UOI, Vellore Citizens Welfare Forum v UOI, "
+            "MC Mehta v UOI (Taj Trapezium)."
+        )
+    # ── ITAT / Income Tax Appeal ──────────────────────────────────────────────
+    elif "itat" in doc_lower or "tax appeal" in doc_lower or "income tax" in doc_lower or "gst appeal" in doc_lower:
+        doc_hint = (
+            "This is a Tax Appeal before ITAT / Appellate Authority. "
+            "Ensure queries target: (a) Income Tax Act 1961 — Section 143(3) assessment, Section 147/148 reassessment, "
+            "Section 263 revision by CIT, Section 271 penalty, "
+            "(b) GST Act — Section 73/74 demand, Section 83 provisional attachment, "
+            "(c) revenue vs capital expenditure — Section 37 IT Act, "
+            "(d) transfer pricing — Section 92 IT Act, arm's length price, "
+            "(e) refund with interest — Section 244-A IT Act."
+        )
+    # ── Commercial Suit ───────────────────────────────────────────────────────
+    elif "commercial" in doc_lower and ("suit" in doc_lower or "court" in doc_lower):
+        doc_hint = (
+            "This is a Commercial Suit under the Commercial Courts Act 2015. "
+            "Ensure queries target: (a) Commercial Courts Act 2015 — specified value threshold (Rs 3 lakh+), jurisdiction, "
+            "(b) mandatory pre-institution mediation — Section 12-A Commercial Courts Act, "
+            "(c) Order XIII-A CPC — summary judgment in commercial disputes, "
+            "(d) Section 36 Arbitration Act — enforcement of arbitral award as commercial matter, "
+            "(e) expedited trial, discovery and document production under Commercial Courts regime."
+        )
+    # ── Industrial Dispute / Labour Court ────────────────────────────────────
+    elif "industrial dispute" in doc_lower or "labour court" in doc_lower or "reinstatement application" in doc_lower:
+        doc_hint = (
+            "This is an Industrial Dispute / Labour Court matter. "
+            "Ensure queries target: (a) Industrial Disputes Act 1947 — Section 25-F retrenchment compensation, "
+            "Section 2(s) workman definition, Section 10 reference to tribunal, "
+            "(b) reinstatement with back wages — unfair labour practice, "
+            "(c) Section 33 ID Act — change in conditions of service during pendency, "
+            "(d) jurisdiction — Industrial Tribunal vs Civil Court, "
+            "(e) precedents: Workmen of Firestone Tyre v Firestone Tyre Co, "
+            "Deepali Gundu Surwase v Kranti Junior Adhyapak Mahavidyalaya."
+        )
+    # ── Divorce / Custody / Maintenance Petition ──────────────────────────────
+    elif any(kw in doc_lower for kw in ["divorce", "custody", "maintenance petition", "domestic violence", "matrimonial"]):
+        doc_hint = (
+            "This is a matrimonial / family law petition. "
+            "Ensure queries target: (a) Hindu Marriage Act 1955 / Special Marriage Act 1954 — grounds for divorce (cruelty, desertion, adultery), "
+            "(b) Section 125 CrPC / Section 144 BNSS — maintenance to wife and children, "
+            "(c) Guardian and Wards Act 1890 / Hindu Minority and Guardianship Act 1956 — child custody, welfare principle, "
+            "(d) Protection of Women from Domestic Violence Act 2005 — protection orders, residence orders, "
+            "(e) irretrievable breakdown of marriage — Article 142 SC power, "
+            "(f) precedents: Shilpa Sailesh v Varun Sreenivasan (irretrievable breakdown), Gita Hariharan v RBI."
+        )
+    # ── Cheque Bounce Complaint ───────────────────────────────────────────────
+    elif "cheque" in doc_lower or "negotiable instrument" in doc_lower or "138" in doc_lower:
+        doc_hint = (
+            "This is a Cheque Dishonour complaint under Section 138 Negotiable Instruments Act. "
+            "Ensure queries target: (a) Section 138 NI Act — essential ingredients: cheque, debt, dishonour, legal notice within 30 days, "
+            "(b) Section 141 NI Act — liability of directors / company officers, "
+            "(c) Section 139 NI Act — presumption of debt, rebuttal, "
+            "(d) Section 147 NI Act — compounding, "
+            "(e) Court Metropolitan Magistrate jurisdiction, territorial jurisdiction — where cheque presented, "
+            "(f) precedents: Kusum Ingots v UOI, Dashrath Rupsingh Rathod v State of Maharashtra (territorial jurisdiction)."
+        )
+    # ── Money Recovery Civil Suit ─────────────────────────────────────────────
+    elif "money recovery" in doc_lower or "civil suit" in doc_lower or "execution petition" in doc_lower:
+        doc_hint = (
+            "This is a Civil Suit for money recovery / specific performance / partition / injunction. "
+            "Ensure queries target: (a) Specific Relief Act 1963 — Section 10 specific performance, "
+            "Section 38/39 permanent injunction, Section 6 suit for possession, "
+            "(b) CPC Order VII Rule 11 — rejection of plaint, "
+            "(c) CPC Order 39 Rules 1 & 2 — temporary injunction — prima facie case, balance of convenience, irreparable harm, "
+            "(d) Section 9 CPC — civil courts jurisdiction, "
+            "(e) Limitation Act 1963 — Article 54 specific performance (3 years), "
+            "(f) precedents: Gujarat Bottling Co v Coca Cola Co (injunction), Adani Gas Ltd v UOI."
+        )
+    # ── Consumer Complaint ────────────────────────────────────────────────────
+    elif "consumer complaint" in doc_lower or "consumer protection" in doc_lower or "ncdrc" in doc_lower:
+        doc_hint = (
+            "This is a Consumer Complaint under the Consumer Protection Act 2019. "
+            "Ensure queries target: (a) CPA 2019 — Section 2(7) consumer definition, Section 2(16) defect, "
+            "Section 2(42) unfair trade practice, Section 2(11) deficiency in service, "
+            "(b) pecuniary jurisdiction — District / State / National Commission (up to 1 Cr / 10 Cr / above), "
+            "(c) CPA 2019 Section 35/47/58 complaint procedure, "
+            "(d) service provider liability — builder, insurance company, hospital, "
+            "(e) precedents: Spring Meadows Hospital v Harjol Ahluwalia, IREO Grace Realtech v Abhishek Khanna."
+        )
+
 
     # Fallback for unmatched types — use subject matter directly
     if not doc_hint:
@@ -549,6 +877,7 @@ async def retrieve_statutes(
     embedding_fn=None,
     coi_only: bool = False,
     document_type_key: str = "",
+    subject_matter: str = "",
     context: str = "search",
     query_vectors: dict = None,
 ) -> list:
@@ -567,7 +896,8 @@ async def retrieve_statutes(
     if coi_only:
         code_filter_sql = " AND lcs.legal_code_id = 7"
     elif document_type_key and context == "citations":
-        relevant_codes = _derive_statute_codes(document_type_key)
+        # Pass subject_matter so COI is only included when constitutionally relevant
+        relevant_codes = _derive_statute_codes(document_type_key, subject_matter)
         if relevant_codes:
             code_filter_sql = " AND lc.short_code = ANY(:statute_codes)"
             code_params["statute_codes"] = relevant_codes
@@ -871,7 +1201,7 @@ async def rerank_candidates(
                 s = c.get("rerank_score", 0.0)
                 # Cross encoder scores are usually logits (e.g. -10 to +10).
                 # Removed absolute cutoff because logits can be negative even for the best match.
-                if s < max_score - 3.0:  # Relative drop-off for logits
+                if s < max_score - 2.0:  # Relative drop-off for logits (tightened from 3.0)
                     continue
                 filtered.append(c)
                 
@@ -955,9 +1285,22 @@ def assemble_prompt(
         for r in statute_results[:5]
     ) or "[No statute sections retrieved]"
 
+    # Bug 1b fix: include case_number + year prominently so LLM cites the right identifier.
+    # Use 'holding' field if available; fall back to raw text snippet.
+    def _fmt_judgment(r):
+        title = r.get('title', 'Unknown')
+        case_no = r.get('case_number', '')
+        year = r.get('year', '')
+        # Prefer a dedicated holding field if populated
+        snippet = r.get('holding') or r.get('text', '')
+        snippet = snippet[:700] if snippet else ''
+        return (
+            f"- {title} [{case_no}] ({year}):\n"
+            f"  HOLDING (cite ONLY for this proposition): {snippet}"
+        )
+
     judgments_block = "\n".join(
-        f"- {r.get('title', 'Unknown')} [{r.get('case_number', '')}] ({r.get('year', '')}):\n  Actual Holding/Snippet: {r['text'][:600]}"
-        for r in judgment_results[:5]
+        _fmt_judgment(r) for r in judgment_results[:5]
     ) or "[No precedents retrieved]"
 
     court_display  = form_data.get("court_display", "the court")
@@ -984,6 +1327,21 @@ def assemble_prompt(
         # Graceful fallback if template file not yet created for this doc type
         template = jinja_env.get_template("document_types/writ_petition.txt")
 
+    # Bug 4 fix: merge user-provided mandatory_paragraphs (free-text field) into body_paras.
+    # This ensures the LLM's MANDATORY PARAGRAPHS list includes both DB-seeded and
+    # user-typed custom paragraphs, preventing any from being silently dropped.
+    user_mandatory_text = form_data.get("mandatory_paragraphs", "").strip()
+    merged_body_paras = list((mandatory_paragraphs or {}).get("body_paras", []))
+    if user_mandatory_text:
+        # Split by newline or semicolon to support multiple custom paragraphs
+        import re as _re
+        custom_items = [p.strip() for p in _re.split(r'[\n;]+', user_mandatory_text) if p.strip()]
+        for item in custom_items:
+            merged_body_paras.append({"instruction": item, "is_conditional": False})
+
+    # Bug 2 fix: compute has_uploads so templates can guard the ANNEXURES section.
+    has_uploads = bool(uploaded_docs_context and uploaded_docs_context.strip())
+
     context = {
         "current_year":        datetime.now().year,
         "doc_type":            doc_type,
@@ -993,12 +1351,13 @@ def assemble_prompt(
         "respondents":         respondents,
         "form_data":           form_data,
         "uploaded_docs_context": uploaded_docs_context,
+        "has_uploads":         has_uploads,
         "statutes_block":      statutes_block,
         "judgments_block":     judgments_block,
         "court_rules_block":   court_rules_block,
         "structure_rules":     structure_rules or [],
         "opening_paras":       (mandatory_paragraphs or {}).get("opening_paras", []),
-        "body_paras":          (mandatory_paragraphs or {}).get("body_paras", []),
+        "body_paras":          merged_body_paras,
     }
 
     return template.render(**context)
