@@ -19,7 +19,7 @@ DOMAIN_MAP = {
     # Core Procedural & Substantive Civil
     "CPC": ["civil", "procedure"],
     "SRA": ["civil", "substantive"],
-    "COI": ["civil", "criminal", "constitutional", "procedure", "substantive"],
+    "COI": ["constitutional"],
     
     # Newly seeded acts
     "CONTRACT": ["civil", "corporate"],

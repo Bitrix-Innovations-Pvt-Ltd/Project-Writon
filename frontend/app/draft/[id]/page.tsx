@@ -1573,22 +1573,22 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 draftId={activeDraftId !== undefined ? activeDraftId : NaN}
                 documentTypeKey={mapDocTypeToKey(documentType)}
                 formData={{
-                  courtLevel,
-                  documentType,
-                  subjectMatter,
-                  caseDescription,
-                  factsOfCase,
-                  grounds,
-                  reliefSought,
-                  advocateName,
-                  advocateEnrollmentNo,
-                  petitioners,
-                  respondents,
-                  impugnedOrderDate: impugnedOrderDate ? new Date(impugnedOrderDate).toISOString() : null,
-                  jurisdictionBasis,
-                  interimReliefSought,
-                  mandatoryParagraphs,
-                  datesAndEvents,
+                  court_level: courtLevel,
+                  document_type: documentType,
+                  subject_matter: subjectMatter,
+                  case_description: caseDescription,
+                  facts_of_case: factsOfCase,
+                  grounds: grounds,
+                  relief_sought: reliefSought,
+                  advocate_name: advocateName,
+                  advocate_enrollment_no: advocateEnrollmentNo,
+                  petitioners: petitioners,
+                  respondents: respondents,
+                  impugned_order_date: impugnedOrderDate ? new Date(impugnedOrderDate).toISOString() : null,
+                  jurisdiction_basis: jurisdictionBasis,
+                  interim_relief_sought: interimReliefSought,
+                  mandatory_paragraphs: mandatoryParagraphs,
+                  dates_and_events: datesAndEvents,
                 }}
                 onComplete={(summary, updatedFormData, newDraftId) => {
                   setGapFillSummary(summary);

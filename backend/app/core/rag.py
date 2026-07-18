@@ -61,13 +61,13 @@ _DOC_TYPE_CASE_TYPES: dict = {
 }
 
 _DOC_TYPE_DOMAINS: dict = {
-    "writ_petition_civil":    ["civil", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
-    "writ_petition_criminal": ["criminal", "evidence", "procedure", "constitutional"],
-    "bail_application":       ["criminal", "evidence", "procedure"],
-    "anticipatory_bail":      ["criminal", "evidence", "procedure"],
-    "civil_appeal":           ["civil", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
-    "criminal_appeal":        ["criminal", "evidence", "procedure", "constitutional"],
-    "writ_petition":          ["civil", "criminal", "tax", "family", "corporate", "evidence", "procedure", "constitutional"],
+    "writ_petition_civil":    ["civil", "constitutional"],
+    "writ_petition_criminal": ["criminal", "constitutional"],
+    "bail_application":       ["criminal"],
+    "anticipatory_bail":      ["criminal"],
+    "civil_appeal":           ["civil", "constitutional"],
+    "criminal_appeal":        ["criminal", "constitutional"],
+    "writ_petition":          ["civil", "criminal", "constitutional"],
 }
 
 # Subject-matter keywords that warrant adding COI to statute retrieval
