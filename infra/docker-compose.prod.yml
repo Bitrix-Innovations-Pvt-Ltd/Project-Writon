@@ -6,21 +6,21 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./infra/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - frontend
       - backend
 
   frontend:
     build:
-      context: ./frontend
+      context: ../frontend
     environment:
       - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
       - NEXT_PUBLIC_API_URL=/api
 
   backend:
     build:
-      context: ./backend
+      context: ../backend
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
@@ -45,7 +45,7 @@ services:
 
   scraper:
     build:
-      context: ./backend
+      context: ../backend
     command: python -m app.modules.scraper.pipeline
     profiles: ["scraper"]
     environment:
