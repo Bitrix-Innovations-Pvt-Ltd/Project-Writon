@@ -66,7 +66,7 @@ _DOC_TYPE_STATUTE_CODES: dict = {
     "writ_petition_civil":    ["CPC", "SRA", "BSA"],
     "writ_petition_criminal": ["COI", "CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "bail_application":       ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
-    "anticipatory_bail":      ["CrPC", "BNSS", "BSA"],
+    "anticipatory_bail":      ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "civil_appeal":           ["CPC", "COI", "BSA"],
     "criminal_appeal":        ["CrPC", "BNSS", "IPC", "BNS", "BSA"],
     "writ_petition":          ["COI", "CPC", "CrPC", "BNSS", "BSA"],
