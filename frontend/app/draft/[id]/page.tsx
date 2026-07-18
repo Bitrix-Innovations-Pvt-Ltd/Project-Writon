@@ -1584,7 +1584,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   advocateEnrollmentNo,
                   petitioners,
                   respondents,
-                  impugnedOrderDate: impugnedOrderDate ? impugnedOrderDate.toISOString() : null,
+                  impugnedOrderDate: impugnedOrderDate ? new Date(impugnedOrderDate).toISOString() : null,
                   jurisdictionBasis,
                   interimReliefSought,
                   mandatoryParagraphs,
