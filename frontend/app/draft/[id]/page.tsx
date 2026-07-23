@@ -741,29 +741,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const handleDownloadWord = () => {
     if (!editorRef.current) return;
     
-    // Construct footer string
-    const advName = advocateName || "____________________";
-    const advEnroll = advocateEnrollmentNo || "_______________";
-    const footerHtml = `
-      <br/><br/>
-      <table style="width: 100%; border: none; font-family: 'Times New Roman', Times, serif; font-size: 14pt; margin-top: 50px;">
-        <tr>
-          <td style="width: 50%; vertical-align: bottom;">
-            PLACE: ______________<br/>
-            DATED: ______________
-          </td>
-          <td style="width: 50%; text-align: right; vertical-align: bottom;">
-            <b>(${advName.toUpperCase()})</b><br/>
-            Advocate<br/>
-            Enrollment No. ${advEnroll}<br/>
-            Counsel for Petitioner
-          </td>
-        </tr>
-      </table>
-      <br clear="all" style="page-break-before:always" />
-    `;
-
-    // Sections list — signature appears after every section.
+    // Sections list
     const sectionRegex = /<<SECTION:(\w+)>>([\s\S]*?)(?=<<SECTION:|<<END_SECTION>>|$)/g;
     const parsedSections: { name: string; content: string }[] = [];
     const seenSectionNames = new Set<string>();
@@ -786,8 +764,6 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       // The editorRef DOM children match the order of parsedSections
       const domPage = editorRef.current!.children[i];
       finalHtml += domPage ? domPage.innerHTML : content;
-      // Append signature after every section
-      finalHtml += `<br/><br/>${footerHtml.replace('<br clear="all" style="page-break-before:always" />', '')}`;
       // Page break between sections (not after the last)
       if (i < parsedSections.length - 1) {
         finalHtml += '<br clear="all" style="page-break-before:always" />';
@@ -2051,24 +2027,6 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                             >
                               {content}
                             </ReactMarkdown>
-
-                            {/* Advocate signature — after every section */}
-                            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '50px', fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt' }}>
-                                <tbody>
-                                  <tr>
-                                    <td style={{ width: '50%', verticalAlign: 'bottom', border: 'none', padding: 0 }}>
-                                      PLACE: ______________<br/>
-                                      DATED: ______________
-                                    </td>
-                                    <td style={{ width: '50%', textAlign: 'right', verticalAlign: 'bottom', border: 'none', padding: 0 }}>
-                                      <b>({(advocateName || '____________________').toUpperCase()})</b><br/>
-                                      Advocate<br/>
-                                      Enrollment No. {advocateEnrollmentNo || '_______________'}<br/>
-                                      Counsel for Petitioner
-                                    </td>
-                                  </tr>
-                                </tbody>
-                              </table>
                           </div>
                         ) : (
                           <div
