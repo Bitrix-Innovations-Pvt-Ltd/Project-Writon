@@ -30,10 +30,16 @@ async def get_model() -> SentenceTransformer:
             if _model is None:
                 print("Loading Legal-BERT for API…")
                 # run_in_executor keeps the blocking I/O off the event loop
+                # low_cpu_mem_usage=False is required: sentence-transformers 3.3.1
+                # + torch 2.6 defaults to meta-tensor init which breaks .to(device).
                 loop = asyncio.get_event_loop()
                 _model = await loop.run_in_executor(
                     None,
-                    lambda: SentenceTransformer("nlpaueb/legal-bert-base-uncased", device="cpu"),
+                    lambda: SentenceTransformer(
+                        "nlpaueb/legal-bert-base-uncased",
+                        device="cpu",
+                        model_kwargs={"low_cpu_mem_usage": False},
+                    ),
                 )
                 print("Legal-BERT loaded.")
     return _model
