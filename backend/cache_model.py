@@ -8,18 +8,13 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 from sentence_transformers import models as st_models
 
 print("Pre-downloading Legal-BERT model weights...")
-# Build via modules API so no .to(device) is called on meta tensors
-transformer = st_models.Transformer(
+model = SentenceTransformer(
     "nlpaueb/legal-bert-base-uncased",
-    cache_dir="/model_cache",
-    model_args={"low_cpu_mem_usage": False},
+    cache_folder="/model_cache",
+    device="cpu"
 )
-pooling = st_models.Pooling(
-    transformer.get_word_embedding_dimension(),
-    pooling_mode_mean_tokens=True,
-)
-model = SentenceTransformer(modules=[transformer, pooling], cache_folder="/model_cache")
 print("Legal-BERT cached successfully.")
+
 
 print("Pre-downloading Cross-Encoder model weights...")
 reranker = CrossEncoder(

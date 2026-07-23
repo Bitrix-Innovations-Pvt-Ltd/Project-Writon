@@ -29,33 +29,18 @@ async def get_model() -> SentenceTransformer:
             # Double-checked locking: re-test inside the lock
             if _model is None:
                 print("Loading Legal-BERT for API…")
-                loop = asyncio.get_event_loop()
-
-                def _load():
-                    from sentence_transformers import models as st_models
-                    import os
-
-                    # Use baked-in cache if available (set in Dockerfile),
-                    # otherwise fall back to default HuggingFace cache.
-                    cache_dir = os.environ.get("SENTENCE_TRANSFORMERS_HOME") or None
-
-                    # Build via modules API — never calls .to(device) on meta tensors.
-                    # low_cpu_mem_usage=False loads weights directly into CPU RAM.
-                    transformer = st_models.Transformer(
-                        "nlpaueb/legal-bert-base-uncased",
-                        cache_dir=cache_dir,
-                        model_args={"low_cpu_mem_usage": False},
-                    )
-                    pooling = st_models.Pooling(
-                        transformer.get_word_embedding_dimension(),
-                        pooling_mode_mean_tokens=True,
-                    )
-                    return SentenceTransformer(
-                        modules=[transformer, pooling],
-                        cache_folder=cache_dir,
-                    )
-
-                _model = await loop.run_in_executor(None, _load)
+                # IMPORTANT: We MUST load this synchronously in the main thread.
+                # Attempting to load HuggingFace models inside loop.run_in_executor
+                # (a background thread) causes PyTorch 2.6's meta-tensor compilation
+                # to crash with NotImplementedError. Since the model is pre-cached on
+                # disk, this blocking call is fast and safe during server startup.
+                import os
+                cache_dir = os.environ.get("SENTENCE_TRANSFORMERS_HOME") or None
+                _model = SentenceTransformer(
+                    "nlpaueb/legal-bert-base-uncased",
+                    cache_folder=cache_dir,
+                    device="cpu"
+                )
                 print("Legal-BERT loaded.")
     return _model
 

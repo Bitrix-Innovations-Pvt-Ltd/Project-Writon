@@ -171,11 +171,12 @@ async def load_reranker():
             if _reranker is None:
                 print("Loading cross-encoder reranker (ms-marco-MiniLM-L-6-v2)...")
                 from sentence_transformers import CrossEncoder
-                loop = asyncio.get_event_loop()
-                import torch
-                _reranker = await loop.run_in_executor(
-                    None,
-                    lambda: CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu", automodel_args={"torch_dtype": torch.float32})
+                import os
+                cache_dir = os.environ.get("SENTENCE_TRANSFORMERS_HOME") or None
+                _reranker = CrossEncoder(
+                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                    device="cpu",
+                    cache_dir=cache_dir
                 )
                 print("Cross-encoder reranker loaded.")
     return _reranker
