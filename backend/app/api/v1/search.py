@@ -29,21 +29,27 @@ async def get_model() -> SentenceTransformer:
             # Double-checked locking: re-test inside the lock
             if _model is None:
                 print("Loading Legal-BERT for API…")
-                # IMPORTANT: do NOT pass device= here.
-                # SentenceTransformer 3.3.1 calls self.to(device) in __init__
-                # whenever device= is supplied. nlpaueb/legal-bert-base-uncased
-                # initialises weights on a meta device first; calling .to() on a
-                # meta tensor raises NotImplementedError. Omitting device= skips
-                # that code path entirely — the model defaults to CPU on a
-                # GPU-less VM automatically.
                 loop = asyncio.get_event_loop()
-                _model = await loop.run_in_executor(
-                    None,
-                    lambda: SentenceTransformer(
+
+                def _load():
+                    from sentence_transformers import models as st_models
+                    # Build manually via modules to bypass SentenceTransformer.__init__
+                    # which unconditionally calls self.to(device) — this crashes when
+                    # the underlying AutoModel loads weights onto a meta device first
+                    # (default behaviour in transformers >= 4.x with accelerate).
+                    # Using models.Transformer with low_cpu_mem_usage=False loads
+                    # weights directly into CPU RAM, avoiding the meta-device path.
+                    transformer = st_models.Transformer(
                         "nlpaueb/legal-bert-base-uncased",
-                        model_kwargs={"low_cpu_mem_usage": False},
-                    ),
-                )
+                        model_args={"low_cpu_mem_usage": False},
+                    )
+                    pooling = st_models.Pooling(
+                        transformer.get_word_embedding_dimension(),
+                        pooling_mode_mean_tokens=True,
+                    )
+                    return SentenceTransformer(modules=[transformer, pooling])
+
+                _model = await loop.run_in_executor(None, _load)
                 print("Legal-BERT loaded.")
     return _model
 
