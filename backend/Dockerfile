@@ -77,4 +77,4 @@ USER app
 EXPOSE 8000
 
 # Exec form so signals (SIGTERM) reach uvicorn directly without a shell wrapper
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--no-access-log"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]
