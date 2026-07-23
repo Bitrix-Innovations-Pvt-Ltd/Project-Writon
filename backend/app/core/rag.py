@@ -42,7 +42,7 @@ _reranker_lock = asyncio.Lock()
 # USE_CHUNKS flag — flip to True once judgment_chunks table is populated
 # (chunking pipeline has been run). No other code change needed.
 # ---------------------------------------------------------------------------
-USE_CHUNKS = False
+USE_CHUNKS = True
 
 
 # ===========================================================================
@@ -741,6 +741,11 @@ async def retrieve_judgment_chunks(
                            jc.judgment_id AS id,
                            j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                            COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                               || CASE 
+                                      WHEN jc.paragraph_number_start IS NOT NULL AND jc.paragraph_number_start = jc.paragraph_number_end THEN '[Para ' || jc.paragraph_number_start::text || '] '
+                                      WHEN jc.paragraph_number_start IS NOT NULL THEN '[Para ' || jc.paragraph_number_start::text || '-' || jc.paragraph_number_end::text || '] '
+                                      ELSE '' 
+                                  END
                                || SUBSTRING(jc.chunk_text, 1, 1200) AS chunk_text,
                            jc.embedding <-> :q_vec AS distance
                     FROM   judgment_chunks jc
@@ -803,34 +808,18 @@ async def retrieve_judgment_chunks(
                     words = [w for w in re.split(r'\W+', query) if len(w) > 2]
                     if len(words) > 1:
                         or_query = " | ".join(words)
-                        if USE_CHUNKS:
-                            fallback_sql = f"""
-                                SELECT jc.id AS chunk_id,
-                                       jc.judgment_id AS id,
-                                       j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                                       COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                                           || SUBSTRING(jc.chunk_text, 1, 1200) AS chunk_text,
-                                       ts_rank_cd(jc.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
-                                FROM   judgment_chunks jc
-                                JOIN   judgments j ON j.id = jc.judgment_id
-                                WHERE  jc.search_vector @@ to_tsquery('{ts_config}', :or_q)
-                                {ct_filter_sql}
-                                ORDER  BY rank_score DESC
-                                LIMIT  30
-                            """
-                        else:
-                            fallback_sql = f"""
-                                SELECT j.id,
-                                       j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                                       COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                                           || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                                       ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
-                                FROM   judgments j
-                                WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
-                                {ct_filter_sql}
-                                ORDER  BY rank_score DESC
-                                LIMIT  30
-                            """
+                        fallback_sql = f"""
+                            SELECT j.id,
+                                   j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                                   COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                                       || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
+                                   ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                            FROM   judgments j
+                            WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
+                            {ct_filter_sql}
+                            ORDER  BY rank_score DESC
+                            LIMIT  30
+                        """
                         try:
                             kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})
                         except Exception as fallback_err:

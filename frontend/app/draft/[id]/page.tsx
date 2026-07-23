@@ -80,6 +80,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [reliefSought, setReliefSought] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({}); 
   const [uploadError, setUploadError] = useState<string | null>(null); 
+  const [customDocsList, setCustomDocsList] = useState<{document_name: string, description: string}[]>([]);
+  const [isAddingCustomDoc, setIsAddingCustomDoc] = useState(false);
+  const [newCustomDocName, setNewCustomDocName] = useState('');
   
   // Citations State
   const [suggestedJudgments, setSuggestedJudgments] = useState<any[]>([]);
@@ -490,7 +493,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     { num: 7, label: 'Generate' },
   ];
 
-  const totalDocs = requiredDocsList.length + optionalDocsList.length;
+  const totalDocs = requiredDocsList.length + optionalDocsList.length + customDocsList.length + 1;
   const confirmedDocs = Object.keys(uploadedDocs).length;
 
   const handleNext = async () => {
@@ -743,7 +746,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     const advEnroll = advocateEnrollmentNo || "_______________";
     const footerHtml = `
       <br/><br/>
-      <table style="width: 100%; border: none; font-family: 'Times New Roman', Times, serif; font-size: 12pt; margin-top: 50px;">
+      <table style="width: 100%; border: none; font-family: 'Times New Roman', Times, serif; font-size: 14pt; margin-top: 50px;">
         <tr>
           <td style="width: 50%; vertical-align: bottom;">
             PLACE: ______________<br/>
@@ -791,8 +794,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       }
     });
     
-    const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Draft Document</title></head><body>";
-    const footer = "</body></html>";
+    const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><style>@page WordSection1 { size: 8.5in 14.0in; margin: 1.0in 1.0in 1.0in 1.0in; } div.WordSection1 { page: WordSection1; } body { font-family: 'Times New Roman', Times, serif; font-size: 14pt; line-height: 1.5; } h1, h2, h3, h4, h5, h6 { font-family: 'Times New Roman', Times, serif; font-size: 14pt; font-weight: bold; }</style></head><body><div class='WordSection1'>";
+    const footer = "</div></body></html>";
     const html = header + finalHtml + footer;
     const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
@@ -1386,6 +1389,130 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                         </div>
                       </div>
                     )}
+
+                    {/* Lower Court Judgment (Always Optional) */}
+                    <div>
+                      <div className="flex items-center gap-3 mb-4 mt-6">
+                        <span className="bg-[#E4C853]/20 text-[#715000] px-2 py-1 rounded text-xs font-bold tracking-wider">OPTIONAL</span>
+                        <span className="text-sm text-on-surface-variant">For extracting facts and reasoning</span>
+                      </div>
+                      <div className="space-y-4">
+                        <div className={`p-4 border rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all ${uploadedDocs['Lower Court Judgment'] === 'uploaded' ? 'border-primary bg-primary/5' : uploadedDocs['Lower Court Judgment'] === 'unavailable' ? 'border-outline-variant bg-surface-container-low opacity-75' : 'border-outline-variant bg-white'}`}>
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              {uploadedDocs['Lower Court Judgment'] === 'uploaded' && <span className="material-symbols-outlined text-primary text-sm font-bold">check_circle</span>}
+                              <h4 className={`font-bold ${uploadedDocs['Lower Court Judgment'] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>Lower Court Judgment</h4>
+                            </div>
+                            <p className="text-xs text-on-surface-variant">Upload the lower court's judgment to automatically extract facts and reasoning via OCR for better drafting context.</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => setDocStatus('Lower Court Judgment', 'unavailable')}
+                              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${uploadedDocs['Lower Court Judgment'] === 'unavailable' ? 'bg-surface-container-highest border-outline text-on-surface' : 'bg-white border-outline-variant text-on-surface-variant hover:bg-surface-container-low'}`}
+                            >
+                              Not Available
+                            </button>
+                            <label className={`cursor-pointer px-4 py-1.5 text-xs font-bold rounded-lg border transition-colors flex items-center gap-2 ${uploadedDocs['Lower Court Judgment'] === 'uploaded' ? 'bg-primary border-primary text-white' : 'bg-surface border-outline-variant text-primary hover:bg-primary/5 hover:border-primary/50'}`}>
+                              <span className="material-symbols-outlined text-[16px]">upload</span>
+                              {uploadedDocs['Lower Court Judgment'] === 'uploaded' ? 'Uploaded' : uploadedDocs['Lower Court Judgment'] === 'uploading' ? 'Uploading...' : 'Upload'}
+                              <input type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => handleFileUpload(e, 'Lower Court Judgment')} />
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Custom Documents */}
+                    {customDocsList.length > 0 && (
+                      <div>
+                        <div className="flex items-center gap-3 mb-4 mt-6">
+                          <span className="bg-blue-500/10 text-blue-700 px-2 py-1 rounded text-xs font-bold tracking-wider">ADDITIONAL</span>
+                          <span className="text-sm text-on-surface-variant">Custom documents you added</span>
+                        </div>
+                        <div className="space-y-4">
+                          {customDocsList.map(doc => (
+                            <div key={doc.document_name} className={`p-4 border rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all ${uploadedDocs[doc.document_name] === 'uploaded' ? 'border-primary bg-primary/5' : 'border-outline-variant bg-white'}`}>
+                              <div>
+                                <div className="flex items-center gap-2 mb-1">
+                                  {uploadedDocs[doc.document_name] === 'uploaded' && <span className="material-symbols-outlined text-primary text-sm font-bold">check_circle</span>}
+                                  <h4 className={`font-bold ${uploadedDocs[doc.document_name] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>{doc.document_name}</h4>
+                                </div>
+                                <p className="text-xs text-on-surface-variant">{doc.description}</p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button 
+                                  onClick={() => {
+                                    setCustomDocsList(prev => prev.filter(d => d.document_name !== doc.document_name));
+                                    const newUploaded = {...uploadedDocs};
+                                    delete newUploaded[doc.document_name];
+                                    setUploadedDocs(newUploaded);
+                                  }}
+                                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border bg-white border-error text-error hover:bg-error/5 transition-colors"
+                                >
+                                  Remove
+                                </button>
+                                <label className={`cursor-pointer px-4 py-1.5 text-xs font-bold rounded-lg border transition-colors flex items-center gap-2 ${uploadedDocs[doc.document_name] === 'uploaded' ? 'bg-primary border-primary text-white' : 'bg-surface border-outline-variant text-primary hover:bg-primary/5 hover:border-primary/50'}`}>
+                                  <span className="material-symbols-outlined text-[16px]">upload</span>
+                                  {uploadedDocs[doc.document_name] === 'uploaded' ? 'Uploaded' : uploadedDocs[doc.document_name] === 'uploading' ? 'Uploading...' : 'Upload'}
+                                  <input type="file" className="hidden" onChange={(e) => handleFileUpload(e, doc.document_name)} />
+                                </label>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Add Custom Document Button/Input */}
+                    <div className="mt-8">
+                      {!isAddingCustomDoc ? (
+                        <button 
+                          onClick={() => setIsAddingCustomDoc(true)}
+                          className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-primary bg-primary/5 border border-dashed border-primary/30 rounded-xl hover:bg-primary/10 transition-colors w-full justify-center"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">add_circle</span>
+                          Add Additional Document
+                        </button>
+                      ) : (
+                        <div className="p-4 border rounded-xl bg-surface-container-lowest border-outline-variant flex flex-col sm:flex-row sm:items-end gap-4">
+                          <div className="flex-1">
+                            <label className="block text-xs font-bold text-on-surface-variant mb-1">Document Name *</label>
+                            <input 
+                              type="text" 
+                              value={newCustomDocName}
+                              onChange={(e) => setNewCustomDocName(e.target.value)}
+                              placeholder="e.g. Bank Statement, Medical Report" 
+                              className="w-full p-2.5 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white"
+                              autoFocus
+                            />
+                          </div>
+                          <div className="flex gap-2 w-full sm:w-auto">
+                            <button 
+                              onClick={() => {
+                                if (newCustomDocName.trim()) {
+                                  setCustomDocsList(prev => [...prev, { document_name: newCustomDocName.trim(), description: 'Custom uploaded document' }]);
+                                  setNewCustomDocName('');
+                                  setIsAddingCustomDoc(false);
+                                }
+                              }}
+                              disabled={!newCustomDocName.trim()}
+                              className="flex-1 sm:flex-none px-6 py-2.5 bg-primary text-white text-sm font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
+                            >
+                              Save & Upload
+                            </button>
+                            <button 
+                              onClick={() => {
+                                setNewCustomDocName('');
+                                setIsAddingCustomDoc(false);
+                              }}
+                              className="px-4 py-2.5 text-on-surface-variant hover:bg-surface-container-low rounded-lg text-sm font-bold transition-colors border border-transparent"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
               </div>
@@ -1519,16 +1646,6 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   <label className="block text-sm font-bold text-on-surface mb-1">Mandatory Paragraphs (Optional)</label>
                   <p className="text-xs text-on-surface-variant mb-2">Specify any mandatory paragraphs or declarations that must be included based on the draft type or past records.</p>
                   <textarea value={mandatoryParagraphs} onChange={(e) => setMandatoryParagraphs(e.target.value)} placeholder="e.g. That no similar petition has been filed before this Hon'ble Court..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-bold text-on-surface mb-1">Lower Court Judgment (Optional)</label>
-                  <p className="text-xs text-on-surface-variant mb-2">Upload the lower court's judgment to automatically extract facts and reasoning via OCR for better drafting context.</p>
-                  <div className="flex items-center gap-4">
-                    <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => handleFileUpload(e, 'Lower Court Judgment')} className="w-full max-w-sm p-2 border border-outline-variant rounded-lg text-sm bg-white" />
-                    {uploadedDocs['Lower Court Judgment'] === 'uploading' && <span className="text-sm text-primary font-medium animate-pulse flex items-center gap-2"><span className="material-symbols-outlined text-sm">cloud_upload</span> Uploading & OCR...</span>}
-                    {uploadedDocs['Lower Court Judgment'] === 'uploaded' && <span className="text-sm text-[#0e6b52] font-bold flex items-center gap-1"><span className="material-symbols-outlined text-sm">check_circle</span> Uploaded & Processed</span>}
-                  </div>
                 </div>
 
                 <div className="bg-surface-container-lowest p-5 rounded-xl border border-outline-variant">
@@ -1856,7 +1973,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 <style type="text/css" media="print">
                   {`
                     @page {
-                      size: A4;
+                      size: 8.5in 14in;
                       margin-top: 1in;
                       margin-bottom: 0.5in;
                       margin-right: 1in;
@@ -1899,7 +2016,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                     return parsed.map(({ name, content }, index) => (
                       <div 
                         key={index}
-                        className="html2pdf__page-break max-w-[850px] mx-auto bg-white shadow-xl min-h-[1123px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
+                        className="html2pdf__page-break max-w-[816px] mx-auto bg-white shadow-xl min-h-[1344px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
                         style={{ 
                           boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
                           paddingTop: '1in',
@@ -1913,7 +2030,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                           <div 
                             ref={el => { pageRefs.current[index] = el; }}
                             className="text-on-surface outline-none prose prose-slate max-w-none"
-                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', lineHeight: '1.5' }}
+                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt', lineHeight: '1.5' }}
                           >
                             <ReactMarkdown 
                               remarkPlugins={[remarkGfm]}
@@ -1923,7 +2040,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 table: ({...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
                                 th: ({...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
                                 td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
-                                h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '16pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
                                 h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
                                 h3: ({...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
                                 p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
@@ -1936,7 +2053,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                             </ReactMarkdown>
 
                             {/* Advocate signature — after every section */}
-                            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '50px', fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '50px', fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt' }}>
                                 <tbody>
                                   <tr>
                                     <td style={{ width: '50%', verticalAlign: 'bottom', border: 'none', padding: 0 }}>
@@ -1957,7 +2074,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                           <div
                             contentEditable={isEditingMode}
                             className={`text-on-surface outline-none prose prose-slate max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
-                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', lineHeight: '1.5', minHeight: '100%' }}
+                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt', lineHeight: '1.5', minHeight: '100%' }}
                             dangerouslySetInnerHTML={{ __html: hasEdited ? htmlPages[index] : (pageRefs.current[index]?.innerHTML || '') }}
                             onInput={(e) => {
                               if (!hasEdited) setHasEdited(true);

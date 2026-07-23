@@ -36,3 +36,6 @@ jinja2==3.1.4
 # Text Chunking
 langchain
 langchain-text-splitters
+
+# Cache (Redis for gapfill session state; hiredis = fast C parser)
+redis[hiredis]>=4.6.0
