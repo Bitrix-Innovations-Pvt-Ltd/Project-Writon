@@ -1979,8 +1979,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
 
                 <div ref={editorRef} className="print:bg-white">
                   {(() => {
-                    // Parse section names alongside content.
-                    // Signature appears after every section unconditionally.
+                    // Parse sections from <<SECTION:NAME>> markers in the generated draft.
                     const sectionRegex = /<<SECTION:(\w+)>>([\s\S]*?)(?=<<SECTION:|<<END_SECTION>>|$)/g;
                     const parsed: { name: string; content: string }[] = [];
                     const seenNames = new Set<string>();
