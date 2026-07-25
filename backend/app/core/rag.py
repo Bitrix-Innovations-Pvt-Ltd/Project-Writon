@@ -201,9 +201,24 @@ async def _exec_raw(engine, sql: str, params: dict, presql: str = None) -> list:
         return result.fetchall()
 
 
-# ivfflat scans `probes` of the index's lists; the default (1) trades too much
-# recall for speed on the 1000-list judgment_chunks index.
-_VEC_PRESQL = "SET LOCAL ivfflat.probes = 20"
+# ── Tunable retrieval knobs (env-overridable; defaults set by benchmark) ────
+# ivfflat scans `probes` of the index's lists; the pgvector default (1) trades
+# too much recall for speed on the 1000-list judgment_chunks index.
+IVFFLAT_PROBES = int(os.getenv("RAG_IVFFLAT_PROBES", "10"))
+_VEC_PRESQL = f"SET LOCAL ivfflat.probes = {IVFFLAT_PROBES}"
+
+# OR-fallback for the judgments corpus: rescues keyword misses but costs ~2s
+# per firing; vector search already covers fuzzy matches, so it defaults off.
+# (The statutes corpus keeps its fallback — tiny table, negligible cost.)
+JUDGMENT_OR_FALLBACK = os.getenv("RAG_JUDGMENT_OR_FALLBACK", "0") == "1"
+
+# Number of rewritten queries to fan out (5-7). Benchmarked 2026-07-25
+# (scripts/evaluate_step6.py): 5 beat 7 on BOTH precision and latency —
+# the extra query angles mostly injected noise into the RRF fusion.
+NUM_QUERIES = int(os.getenv("RAG_NUM_QUERIES", "5"))
+
+# Model used for query rewriting (Stage 1).
+REWRITE_MODEL = os.getenv("RAG_REWRITE_MODEL", "openai/gpt-4o-mini")
 
 
 # ===========================================================================
@@ -656,16 +671,17 @@ async def rewrite_queries(
     # Prepend user-provided search_hint if given
     hint_line = f"\nUser search refinement (incorporate this): {search_hint}" if search_hint else ""
 
+    n = NUM_QUERIES
     try:
         response = await client.chat.completions.create(
-            model="openai/gpt-4o-mini",
+            model=REWRITE_MODEL,
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are an expert Indian legal researcher. Given a case description, "
-                        "generate exactly 7 distinct, highly-optimized search queries to retrieve relevant Indian court judgments and statutes. "
-                        "To maximize recall, the queries MUST target different retrieval angles:\n"
+                        f"generate exactly {n} distinct, highly-optimized search queries to retrieve relevant Indian court judgments and statutes. "
+                        "To maximize recall, the queries MUST target different retrieval angles, in this priority order:\n"
                         "1. Statutory provisions violated (specific section + Act spelled out fully, e.g., 'Section 302 Indian Penal Code')\n"
                         "2. Procedural violations specific to this case type\n"
                         "3. Legal doctrine / principles directly applicable to the facts\n"
@@ -676,7 +692,7 @@ async def rewrite_queries(
                         "CRITICAL: Do NOT generate near-duplicate queries. "
                         "CRITICAL: Spell out full Act names in at least 3 queries for keyword search coverage. "
                         "CRITICAL: Stay focused on the subject matter — avoid broad generic queries. "
-                        "Return ONLY a JSON object with key 'queries' containing an array of exactly 7 strings."
+                        f"Return ONLY a JSON object with key 'queries' containing an array of exactly {n} strings."
                     )
                 },
                 {
@@ -695,7 +711,7 @@ async def rewrite_queries(
         )
         result = json.loads(response.choices[0].message.content)
         queries = result.get("queries", result.get("search_queries", [facts[:200]]))
-        return [q for q in queries if isinstance(q, str)][:7]
+        return [q for q in queries if isinstance(q, str)][:n]
     except Exception as e:
         print(f"Query rewriting failed: {e}")
         return [facts[:200]]
@@ -825,8 +841,8 @@ async def retrieve_judgment_chunks(
                 _exec_raw(engine, keyword_sql, kw_params)
             )
 
-            # ── Typo / Concept OR Fallback ────────────────────────────────
-            if len(kw_rows) < 5:
+            # ── Typo / Concept OR Fallback (off by default — see knob) ────
+            if JUDGMENT_OR_FALLBACK and len(kw_rows) < 5:
                 words = [w for w in re.split(r'\W+', query) if len(w) > 2]
                 if len(words) > 1:
                     or_query = " | ".join(words)
@@ -1484,38 +1500,76 @@ async def rerank_candidates(
             for c in candidates
         ]
         loop = asyncio.get_event_loop()
-        
-        # Removed asyncio.wait_for because on Windows ProactorEventLoop, cancelling a thread pool 
-        # future causes a fatal AttributeError ('NoneType' object has no attribute 'send') when the 
+
+        # Removed asyncio.wait_for because on Windows ProactorEventLoop, cancelling a thread pool
+        # future causes a fatal AttributeError ('NoneType' object has no attribute 'send') when the
         # thread eventually finishes and tries to notify the closed loop.
         scores = await loop.run_in_executor(_reranker_executor, reranker.predict, pairs)
-        
+
         for i, c in enumerate(candidates):
             c["rerank_score"] = float(scores[i])
         reranked = sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
-        
-        filtered = []
-        seen_keys = set()
-        if reranked:
-            max_score = reranked[0].get("rerank_score", 0.0)
-            for c in reranked:
-                s = c.get("rerank_score", 0.0)
-                # Cross encoder scores are usually logits (e.g. -10 to +10).
-                # Removed absolute cutoff because logits can be negative even for the best match.
-                # Explicitly-cited sections (exact_match) always survive the filter.
-                if s < max_score - 2.0 and not c.get("exact_match"):
-                    continue
-                # Drop duplicate cases (same title + year under different ids)
-                key = ((c.get("title") or "").strip().lower(), c.get("year"))
-                if key[0] and key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                filtered.append(c)
-                
-        return filtered[:top_k]
+        return _filter_reranked(reranked)[:top_k]
     except Exception as e:
         print(f"[reranker] Cross-encoder error: {e} — falling back to RRF order")
         return candidates[:top_k]
+
+
+def _filter_reranked(reranked: list) -> list:
+    """Drop-off filter + duplicate-case removal for cross-encoder-scored lists."""
+    filtered = []
+    seen_keys = set()
+    if reranked:
+        max_score = reranked[0].get("rerank_score", 0.0)
+        for c in reranked:
+            s = c.get("rerank_score", 0.0)
+            # Cross encoder scores are usually logits (e.g. -10 to +10).
+            # Removed absolute cutoff because logits can be negative even for the best match.
+            # Explicitly-cited sections (exact_match) always survive the filter.
+            if s < max_score - 2.0 and not c.get("exact_match"):
+                continue
+            # Drop duplicate cases (same title + year under different ids)
+            key = ((c.get("title") or "").strip().lower(), c.get("year"))
+            if key[0] and key in seen_keys:
+                continue
+            seen_keys.add(key)
+            filtered.append(c)
+    return filtered
+
+
+async def rerank_multi(combined_query: str, groups: dict, top_ks: dict) -> dict:
+    """
+    Cross-encoder rerank of several candidate lists in ONE predict() call.
+
+    Halves model-call overhead vs calling rerank_candidates per list — scores
+    are identical because the cross-encoder scores each pair independently.
+
+    groups:  {name: candidates}, top_ks: {name: top_k}
+    Returns {name: reranked+filtered list}; falls back to input order on error.
+    """
+    pairs, owners = [], []
+    for name, cands in groups.items():
+        for c in cands:
+            pairs.append((combined_query, c.get("chunk_text") or c.get("text", "")))
+            owners.append(c)
+    if not pairs:
+        return {name: [] for name in groups}
+
+    try:
+        reranker = await load_reranker()
+        loop = asyncio.get_event_loop()
+        scores = await loop.run_in_executor(_reranker_executor, reranker.predict, pairs)
+        for c, s in zip(owners, scores):
+            c["rerank_score"] = float(s)
+        return {
+            name: _filter_reranked(
+                sorted(cands, key=lambda x: x.get("rerank_score", 0), reverse=True)
+            )[:top_ks.get(name, 10)]
+            for name, cands in groups.items()
+        }
+    except Exception as e:
+        print(f"[reranker] Batched rerank error: {e} — falling back to RRF order")
+        return {name: cands[:top_ks.get(name, 10)] for name, cands in groups.items()}
 
 
 # ===========================================================================

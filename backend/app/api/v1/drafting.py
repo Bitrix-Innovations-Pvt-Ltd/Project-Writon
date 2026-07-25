@@ -72,6 +72,9 @@ class GenerateRequest(BaseModel):
     selected_statutes: Optional[list] = None
     section_format_overrides: Optional[dict] = None
     search_hint: Optional[str] = None
+    # Whitelisted retrieval-knob overrides used by scripts/evaluate_step6.py
+    # for A/B benchmarking against a running server (see rag.py knobs).
+    rag_overrides: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +318,10 @@ async def generate_draft(req: GenerateRequest):
 
 @router.post("/suggest-citations")
 async def suggest_citations(req: GenerateRequest):
+    import hashlib
+    from app.core.rag import rerank_multi
+    from app.core.redis import cache_get, cache_set
+
     ocr_texts = []
     try:
         async with engine.connect() as conn:
@@ -331,7 +338,43 @@ async def suggest_citations(req: GenerateRequest):
 
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
     combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{req.mandatory_paragraphs}\n{uploaded_docs_context}".strip()
-    
+
+    # Benchmark/dev knob overrides — whitelisted keys only
+    disable_cache = False
+    if req.rag_overrides:
+        import app.core.rag as rag_module
+        ov = req.rag_overrides
+        try:
+            if "probes" in ov:
+                rag_module._VEC_PRESQL = f"SET LOCAL ivfflat.probes = {max(1, min(100, int(ov['probes'])))}"
+            if "judgment_or_fallback" in ov:
+                rag_module.JUDGMENT_OR_FALLBACK = bool(ov["judgment_or_fallback"])
+            if "num_queries" in ov:
+                rag_module.NUM_QUERIES = max(3, min(7, int(ov["num_queries"])))
+            rm = ov.get("rewrite_model")
+            if isinstance(rm, str) and rm.startswith(("openai/", "google/", "anthropic/")):
+                rag_module.REWRITE_MODEL = rm
+            disable_cache = bool(ov.get("disable_cache"))
+        except Exception as e:
+            print(f"rag_overrides error (ignored): {e}")
+
+    # Identical Step 6 input (incl. OCR context + search hint) → serve cached
+    # suggestions. Users navigating back/forth re-trigger this endpoint with
+    # the same payload and previously re-paid the full pipeline every time.
+    cache_key = "suggest_citations:" + hashlib.md5(
+        json.dumps([
+            combined_facts, req.document_type, req.document_type_key,
+            req.subject_matter, req.search_hint,
+        ]).encode()
+    ).hexdigest()
+    if not disable_cache:
+        try:
+            cached = await cache_get(cache_key)
+            if cached and isinstance(cached, dict) and cached.get("judgments") is not None:
+                return cached
+        except Exception as e:
+            print(f"suggest-citations cache read error: {e}")
+
     queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter, search_hint=req.search_hint)
     # Rerank query must stay short: the cross-encoder truncates query+passage at
     # ~512 tokens, so joining all 7 queries drowned the passage and produced
@@ -397,13 +440,22 @@ async def suggest_citations(req: GenerateRequest):
     print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
     print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
 
-    # Rerank with cross-encoder enabled
-    top_judgments  = await rerank_candidates(combined_query, judgment_results[:25], top_k=8, use_cross_encoder=True)
-    top_statutes   = await rerank_candidates(combined_query, merged_statutes[:25], top_k=8, use_cross_encoder=True)
-    
-    return {
-        "judgments": top_judgments,
-        "statutes": top_statutes,
+    # Cross-encoder rerank — both lists scored in a single model call
+    reranked = await rerank_multi(
+        combined_query,
+        groups={"judgments": judgment_results[:25], "statutes": merged_statutes[:25]},
+        top_ks={"judgments": 8, "statutes": 8},
+    )
+
+    result = {
+        "judgments": reranked["judgments"],
+        "statutes": reranked["statutes"],
         "queries_used": queries
     }
+    if not disable_cache:
+        try:
+            await cache_set(cache_key, result, ttl_seconds=6 * 3600)
+        except Exception as e:
+            print(f"suggest-citations cache write error: {e}")
+    return result
 
