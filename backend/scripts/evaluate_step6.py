@@ -34,6 +34,8 @@ VARIANTS = {
     "V1": {"probes": 10, "judgment_or_fallback": False, "num_queries": 7, "rewrite_model": "openai/gpt-4o-mini"},
     "V2": {"probes": 10, "judgment_or_fallback": False, "num_queries": 5, "rewrite_model": "openai/gpt-4o-mini"},
     "V3": {"probes": 10, "judgment_or_fallback": False, "num_queries": 5, "rewrite_model": "google/gemini-2.5-flash-lite"},
+    # Accuracy-first: full recall knobs + the 5-query fan-out that won V2
+    "V4": {"probes": 20, "judgment_or_fallback": True,  "num_queries": 5, "rewrite_model": "openai/gpt-4o-mini"},
 }
 
 SCENARIOS = [

@@ -339,11 +339,21 @@ async def suggest_citations(req: GenerateRequest):
     uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
     combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{req.mandatory_paragraphs}\n{uploaded_docs_context}".strip()
 
-    # Benchmark/dev knob overrides — whitelisted keys only
+    # Benchmark/dev knob overrides — whitelisted keys only. The module attrs
+    # are snapshotted here and restored in the finally-block at the end of
+    # this request, so an override can never leak into other users' requests
+    # (a leak here previously let benchmark variants contaminate live results).
     disable_cache = False
+    knob_backup = None
     if req.rag_overrides:
         import app.core.rag as rag_module
         ov = req.rag_overrides
+        knob_backup = {
+            "_VEC_PRESQL": rag_module._VEC_PRESQL,
+            "JUDGMENT_OR_FALLBACK": rag_module.JUDGMENT_OR_FALLBACK,
+            "NUM_QUERIES": rag_module.NUM_QUERIES,
+            "REWRITE_MODEL": rag_module.REWRITE_MODEL,
+        }
         try:
             if "probes" in ov:
                 rag_module._VEC_PRESQL = f"SET LOCAL ivfflat.probes = {max(1, min(100, int(ov['probes'])))}"
@@ -357,6 +367,20 @@ async def suggest_citations(req: GenerateRequest):
             disable_cache = bool(ov.get("disable_cache"))
         except Exception as e:
             print(f"rag_overrides error (ignored): {e}")
+
+    try:
+        return await _suggest_citations_impl(req, combined_facts, disable_cache)
+    finally:
+        if knob_backup is not None:
+            import app.core.rag as rag_module
+            for attr, val in knob_backup.items():
+                setattr(rag_module, attr, val)
+
+
+async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, disable_cache: bool):
+    import hashlib
+    from app.core.rag import rerank_multi
+    from app.core.redis import cache_get, cache_set
 
     # Identical Step 6 input (incl. OCR context + search hint) → serve cached
     # suggestions. Users navigating back/forth re-trigger this endpoint with
