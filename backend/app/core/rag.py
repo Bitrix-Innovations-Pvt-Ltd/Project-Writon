@@ -708,8 +708,16 @@ async def retrieve_judgment_chunks(
 
     context="citations" uses balanced RRF weights (1.5x each).
     context="search"    uses keyword-heavy weights (1x sem, 2x kw) for exact-match recall.
+
+    Post-chunking fixes applied (all active when USE_CHUNKS=True):
+       vec_row_data and kw_row_data are kept separate to prevent BM25 overwriting chunk text.
+      sem_ranks only records first (best-ranked) chunk per judgment_id.
+      chunk_text (raw paragraph) stored separately for cross-encoder; LLM gets holding-prefixed text.
+       Winner chunks are expanded with ±1 neighbouring chunks for richer LLM context.
+       Holding prefix omitted when the chunk itself IS the holding paragraph.
     """
-    all_results = {}
+    # all_results keys on judgment_id → best result dict for that judgment
+    all_results: dict = {}
 
     # Derive case_type filter for citation context
     case_type_filter = _derive_case_type_filter(document_type_key, subject_matter) if document_type_key else []
@@ -736,18 +744,20 @@ async def retrieve_judgment_chunks(
 
             # ── Vector (semantic) search ─────────────────────────────────
             if USE_CHUNKS:
-                # Phase 2 — per-chunk embeddings (more precise)
+                # FIX 3: Select jc.chunk_text separately (raw paragraph) so we can pass
+                # it to the cross-encoder independently of the holding-prefixed LLM text.
+                # FIX 1+2: We alias jc.judgment_id AS id so RRF keys on judgment level.
+                #           chunk_id is preserved separately to enable context expansion.
                 vector_sql = f"""
-                    SELECT jc.id AS chunk_id,
+                    SELECT jc.id          AS chunk_id,
                            jc.judgment_id AS id,
+                           jc.chunk_index,
+                           jc.chunk_text  AS raw_chunk_text,
                            j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                           COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                               || CASE 
-                                      WHEN jc.paragraph_number_start IS NOT NULL AND jc.paragraph_number_start = jc.paragraph_number_end THEN '[Para ' || jc.paragraph_number_start::text || '] '
-                                      WHEN jc.paragraph_number_start IS NOT NULL THEN '[Para ' || jc.paragraph_number_start::text || '-' || jc.paragraph_number_end::text || '] '
-                                      ELSE '' 
-                                  END
-                               || SUBSTRING(jc.chunk_text, 1, 1200) AS chunk_text,
+                           COALESCE(j.holding, '')    AS holding,
+                           COALESCE(j.summary, '')    AS summary,
+                           jc.paragraph_number_start,
+                           jc.paragraph_number_end,
                            jc.embedding <-> :q_vec AS distance
                     FROM   judgment_chunks jc
                     JOIN   judgments j ON j.id = jc.judgment_id
@@ -758,7 +768,6 @@ async def retrieve_judgment_chunks(
                 """
             else:
                 # Phase 1 — full-doc embedding (current state)
-                # Improved: surfaces summary + holding fields first for better snippets
                 vector_sql = f"""
                     SELECT j.id,
                            j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
@@ -772,7 +781,8 @@ async def retrieve_judgment_chunks(
                     LIMIT  30
                 """
 
-            # ── Keyword (BM25) search — enhanced for Indian legal abbreviations ──
+            # ── Keyword (BM25) search — always queries judgments table ──
+            # BM25 results give us the document-level context (summary + holding + full_text).
             ts_config = _get_ts_config(query)
             keyword_sql = f"""
                 SELECT j.id,
@@ -805,7 +815,6 @@ async def retrieve_judgment_chunks(
 
                 # ── Typo / Concept OR Fallback ────────────────────────────────
                 if len(kw_rows) < 5:
-                    import re
                     words = [w for w in re.split(r'\W+', query) if len(w) > 2]
                     if len(words) > 1:
                         or_query = " | ".join(words)
@@ -828,36 +837,165 @@ async def retrieve_judgment_chunks(
 
             except Exception as sql_err:
                 print(f"[retrieve_judgments] SQL error for query '{query}': {sql_err}")
-                # Fallback: run vector-only
                 vec_rows = await _exec_raw(engine, vector_sql, vec_params)
                 kw_rows = []
 
-            # ── RRF fusion ──────────────────────────────────────────────
-            sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
-            kw_ranks  = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
-            all_ids   = set(sem_ranks) | set(kw_ranks)
-            row_data  = {r.id: r for r in (list(vec_rows) + list(kw_rows))}
+            # ── RRF fusion (Fixes 1 + 2) ──────────────────────────────────
+            # FIX 2: Only keep FIRST occurrence of each judgment_id in vec_rows.
+            #         vec_rows is ORDER BY distance ASC, so first = best chunk.
+            vec_row_data: dict = {}   # judgment_id → best chunk row (from vector search)
+            sem_ranks: dict = {}      # judgment_id → 1-based rank of best chunk
+            for idx, r in enumerate(vec_rows):
+                jid = r.id  # aliased as judgment_id
+                if jid not in sem_ranks:
+                    sem_ranks[jid] = idx + 1
+                    vec_row_data[jid] = r   # Only keep the best-ranked chunk per judgment
+
+            # FIX 1: kw_row_data stays separate — BM25 rows use judgments.id directly
+            #         and must NEVER overwrite the precise chunk text from vec_row_data.
+            kw_row_data: dict = {r.id: r for r in kw_rows}
+            kw_ranks: dict    = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
+
+            all_ids = set(sem_ranks) | set(kw_ranks)
 
             for jid in all_ids:
                 rrf = 0.0
                 if jid in sem_ranks: rrf += sem_weight / (60 + sem_ranks[jid])
                 if jid in kw_ranks:  rrf += kw_weight  / (60 + kw_ranks[jid])
                 if jid not in all_results or rrf > all_results[jid]["score"]:
-                    row = row_data[jid]
+                    # FIX 1: Prefer the precise chunk row; fall back to BM25 row
+                    row = vec_row_data.get(jid) or kw_row_data.get(jid)
+                    if row is None:
+                        continue
+
                     title = f"{row.petitioner} v. {row.respondent}" if row.petitioner else "Unknown"
-                    all_results[jid] = {
-                        "id": jid, "score": rrf,
-                        "text": (row.chunk_text or "")[:1000],
-                        "case_number": row.case_number or "",
-                        "title": title,
-                        "year": row.year,
-                        "case_type": getattr(row, "case_type", "") or "",
-                        "corpus": "judgment"
-                    }
+
+                    if USE_CHUNKS and jid in vec_row_data:
+                        # FIX 3 + IMPROVEMENT 5: Build two distinct text representations:
+                        #   chunk_text  → raw paragraph only (for cross-encoder: precise, short)
+                        #   text        → holding-prefixed chunk (for LLM prompt: context-rich)
+                        raw_chunk  = (getattr(row, "raw_chunk_text", "") or "")
+                        holding    = (getattr(row, "holding", "") or "")
+                        summary    = (getattr(row, "summary", "") or "")
+                        para_start = getattr(row, "paragraph_number_start", None)
+                        para_end   = getattr(row, "paragraph_number_end", None)
+
+                        para_label = ""
+                        if para_start is not None:
+                            if para_start == para_end:
+                                para_label = f"[Para {para_start}] "
+                            else:
+                                para_label = f"[Para {para_start}-{para_end}] "
+
+                        # IMPROVEMENT 5: Only prefix holding when this chunk is NOT the holding paragraph.
+                        # Heuristic: if the chunk text overlaps significantly with the holding, skip prefix.
+                        holding_words = set(holding.lower().split()) if holding else set()
+                        chunk_words   = set(raw_chunk.lower().split()[:50]) if raw_chunk else set()
+                        is_holding_chunk = len(holding_words & chunk_words) > 20  # >20 common words = same paragraph
+
+                        if holding and not is_holding_chunk:
+                            holding_prefix = f"HOLDING: {holding[:250]}\n\n"
+                        else:
+                            holding_prefix = ""
+
+                        llm_text   = holding_prefix + para_label + raw_chunk[:900]
+                        xenc_text  = raw_chunk[:500]  # Short + precise for cross-encoder
+
+                        all_results[jid] = {
+                            "id":          jid,
+                            "score":       rrf,
+                            "text":        llm_text,        # For LLM prompt assembly
+                            "chunk_text":  xenc_text,       # For cross-encoder (Fix 3)
+                            "chunk_id":    getattr(row, "chunk_id", None),
+                            "chunk_index": getattr(row, "chunk_index", None),
+                            "case_number": row.case_number or "",
+                            "title":       title,
+                            "year":        row.year,
+                            "case_type":   getattr(row, "case_type", "") or "",
+                            "holding":     holding[:300],
+                            "corpus":      "judgment",
+                        }
+                    else:
+                        # Phase 1 path (USE_CHUNKS=False) or BM25-only result
+                        kw_row = kw_row_data.get(jid)
+                        all_results[jid] = {
+                            "id":         jid,
+                            "score":      rrf,
+                            "text":       (getattr(kw_row, "chunk_text", "") or "")[:1000] if kw_row else "",
+                            "chunk_text": "",
+                            "case_number": row.case_number or "",
+                            "title":       title,
+                            "year":        row.year,
+                            "case_type":   getattr(row, "case_type", "") or "",
+                            "corpus":      "judgment",
+                        }
+
         except Exception as e:
             print(f"Judgment retrieval error for query '{query}': {e}")
 
-    return sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:30]
+    winners = sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:30]
+
+    # ── IMPROVEMENT 4: Context expansion — fetch ±1 neighbouring chunks ──
+    # For each winner that came from a vector chunk, expand the LLM context by
+    # appending the adjacent paragraph(s) so the AI sees WHY the court ruled that way.
+    if USE_CHUNKS:
+        expand_inputs = [
+            (w["id"], w["chunk_index"])
+            for w in winners
+            if w.get("chunk_index") is not None
+        ]
+        if expand_inputs:
+            try:
+                # Single batch query: fetch neighbours for all winners at once
+                # using UNNEST for an IN-style multi-value lookup.
+                jids    = [x[0] for x in expand_inputs]
+                cidxs   = [x[1] for x in expand_inputs]
+                expand_sql = """
+                    SELECT jc.judgment_id,
+                           jc.chunk_index,
+                           jc.chunk_text
+                    FROM   judgment_chunks jc
+                    WHERE  jc.judgment_id = ANY(:jids)
+                      AND  jc.chunk_index = ANY(:cidxs)
+                    ORDER  BY jc.judgment_id, jc.chunk_index
+                """
+                # Build a set of (judgment_id, chunk_index) pairs to fetch: self ± 1
+                neighbour_cidxs = list({ci + delta for ci in cidxs for delta in (-1, 0, 1) if ci + delta >= 0})
+                expand_rows = await _exec_raw(
+                    engine, expand_sql,
+                    {"jids": jids, "cidxs": neighbour_cidxs}
+                )
+
+                # Group neighbour chunks by judgment_id
+                from collections import defaultdict
+                neighbour_map: dict = defaultdict(list)
+                for nr in expand_rows:
+                    neighbour_map[nr.judgment_id].append((nr.chunk_index, nr.chunk_text))
+
+                # For each winner, splice in the neighbour text AROUND the matched chunk
+                for w in winners:
+                    jid    = w["id"]
+                    ci     = w.get("chunk_index")
+                    if ci is None or jid not in neighbour_map:
+                        continue
+                    neighbours = sorted(neighbour_map[jid], key=lambda x: x[0])
+                    # Build: [prev_chunk] [matched_chunk_already_in_text] [next_chunk]
+                    prev_text = next((t for idx, t in neighbours if idx == ci - 1), "")
+                    next_text = next((t for idx, t in neighbours if idx == ci + 1), "")
+                    if prev_text or next_text:
+                        expanded = ""
+                        if prev_text:
+                            expanded += f"[...preceding context]\n{prev_text[:300]}\n\n"
+                        expanded += w["text"]   # Already contains the matched chunk
+                        if next_text:
+                            expanded += f"\n\n[...continuing]\n{next_text[:300]}"
+                        w["text"] = expanded[:1200]   # Hard cap for LLM context budget
+            except Exception as expand_err:
+                # Non-fatal — context expansion is best-effort
+                print(f"[retrieve_judgment_chunks] Context expansion error (non-fatal): {expand_err}")
+
+    return winners
+
 
 
 async def retrieve_statutes(
@@ -1172,7 +1310,13 @@ async def rerank_candidates(
     # Cross-encoder path (enabled for citation suggestion)
     try:
         reranker = await load_reranker()
-        pairs = [(combined_query, c.get("text", "")) for c in candidates]
+        # FIX 3: Prefer chunk_text (precise raw paragraph) over text (holding-prefixed LLM text)
+        # for cross-encoder input. The cross-encoder has a ~512-token window — the precise
+        # matching paragraph is far more informative than 1000 chars of boilerplate.
+        pairs = [
+            (combined_query, c.get("chunk_text") or c.get("text", ""))
+            for c in candidates
+        ]
         loop = asyncio.get_event_loop()
         
         # Removed asyncio.wait_for because on Windows ProactorEventLoop, cancelling a thread pool 
