@@ -204,13 +204,22 @@ async def _exec_raw(engine, sql: str, params: dict, presql: str = None) -> list:
 # ── Tunable retrieval knobs (env-overridable; defaults set by benchmark) ────
 # ivfflat scans `probes` of the index's lists; the pgvector default (1) trades
 # too much recall for speed on the 1000-list judgment_chunks index.
-IVFFLAT_PROBES = int(os.getenv("RAG_IVFFLAT_PROBES", "10"))
+# 20 = accuracy-first (user accepted a 20-25s latency budget on 2026-07-25).
+IVFFLAT_PROBES = int(os.getenv("RAG_IVFFLAT_PROBES", "20"))
 _VEC_PRESQL = f"SET LOCAL ivfflat.probes = {IVFFLAT_PROBES}"
 
-# OR-fallback for the judgments corpus: rescues keyword misses but costs ~2s
-# per firing; vector search already covers fuzzy matches, so it defaults off.
-# (The statutes corpus keeps its fallback — tiny table, negligible cost.)
-JUDGMENT_OR_FALLBACK = os.getenv("RAG_JUDGMENT_OR_FALLBACK", "0") == "1"
+# OR-fallback for the judgments corpus: rescues keyword misses for case-name
+# queries. Enabled by default, but bounded — it only fires for queries that
+# look like case names (see _looks_like_case_name); unrestricted OR queries on
+# common words previously caused 55-90s ts_rank_cd spikes over huge match sets.
+JUDGMENT_OR_FALLBACK = os.getenv("RAG_JUDGMENT_OR_FALLBACK", "1") == "1"
+
+# Case-name heuristic: 'Gurbaksh Singh Sibbia v. State of Punjab holding ...'
+_CASE_NAME_RE = re.compile(r"\bv\.?s?\.?\b", re.IGNORECASE)
+
+
+def _looks_like_case_name(query: str) -> bool:
+    return bool(_CASE_NAME_RE.search(query))
 
 # Number of rewritten queries to fan out (5-7). Benchmarked 2026-07-25
 # (scripts/evaluate_step6.py): 5 beat 7 on BOTH precision and latency —
@@ -229,16 +238,20 @@ async def rewrite_queries(
     doc_type: str,
     subject_matter: str,
     search_hint: str = "",
+    document_type_key: str = "",
 ) -> list:
     """
-    Generate 7 targeted search queries for the given case facts.
+    Generate targeted search queries for the given case facts.
     search_hint: optional user-provided refinement (e.g. 'Section 41A CrPC wrongful arrest').
+    document_type_key: canonical key (e.g. 'anticipatory_bail') — included in the
+    branch-matching haystack because display names are unreliable (a generic
+    'APPLICATION' doc type must not route into the CAT/tribunal branch).
     """
     client = get_openrouter_client()
     if not openrouter_key:
         return [facts[:200]]
 
-    doc_lower = doc_type.lower()
+    doc_lower = f"{(document_type_key or '').replace('_', ' ')} {doc_type}".lower().strip()
     sm_lower  = subject_matter.lower()
 
     # ── Build a rich, doc-type-aware hint covering all document types ─────
@@ -526,7 +539,9 @@ async def rewrite_queries(
             "(e) precedents: State of Karnataka v State of Tamil Nadu, State of Rajasthan v UOI."
         )
     # ── CAT / Service Matter Original Application ─────────────────────────────
-    elif "cat" in doc_lower or "administrative tribunal" in doc_lower or "original application" in doc_lower or ("service" in doc_lower and "tribunal" in doc_lower):
+    # NOTE: word-boundary match — a bare substring 'cat' hijacked every doc type
+    # containing 'application' (appliCATion) into tribunal queries.
+    elif re.search(r"\bcat\b", doc_lower) or "administrative tribunal" in doc_lower or "original application" in doc_lower or ("service" in doc_lower and "tribunal" in doc_lower):
         doc_hint = (
             "This is a Service Matter Original Application before CAT / Administrative Tribunal. "
             f"Subject: {subject_matter}. "
@@ -841,8 +856,11 @@ async def retrieve_judgment_chunks(
                 _exec_raw(engine, keyword_sql, kw_params)
             )
 
-            # ── Typo / Concept OR Fallback (off by default — see knob) ────
-            if JUDGMENT_OR_FALLBACK and len(kw_rows) < 5:
+            # ── Case-name OR Fallback (bounded — see knob comment) ────────
+            # Only fires for case-name-style queries, where strict AND search
+            # usually finds nothing but the distinctive party names make the
+            # OR query cheap. ts_rank (not ts_rank_cd) keeps ranking cheap.
+            if JUDGMENT_OR_FALLBACK and len(kw_rows) < 5 and _looks_like_case_name(query):
                 words = [w for w in re.split(r'\W+', query) if len(w) > 2]
                 if len(words) > 1:
                     or_query = " | ".join(words)
@@ -851,12 +869,12 @@ async def retrieve_judgment_chunks(
                                j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                                COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
                                    || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                               ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                               ts_rank(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
                         FROM   judgments j
                         WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
                         {ct_filter_sql}
                         ORDER  BY rank_score DESC
-                        LIMIT  30
+                        LIMIT  20
                     """
                     try:
                         kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})

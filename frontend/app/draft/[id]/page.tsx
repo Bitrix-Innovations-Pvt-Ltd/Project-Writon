@@ -545,7 +545,17 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       'Criminal Appeal':                'criminal_appeal',
       'Special Leave Petition':         'writ_petition_civil',
     };
-    return map[displayName] || 'writ_petition_civil';
+    if (map[displayName]) return map[displayName];
+    // Keyword inference for the many DB doc-type names not in the map —
+    // a blind writ_petition_civil default sent bail/criminal matters through
+    // civil statute filters and produced irrelevant citations.
+    const dl = displayName.toLowerCase();
+    if (dl.includes('anticipatory')) return 'anticipatory_bail';
+    if (dl.includes('bail')) return 'bail_application';
+    if (dl.includes('criminal') && dl.includes('appeal')) return 'criminal_appeal';
+    if (dl.includes('appeal')) return 'civil_appeal';
+    if (dl.includes('criminal') || dl.includes('complaint') || dl.includes('discharge') || dl.includes('charge')) return 'writ_petition_criminal';
+    return 'writ_petition_civil';
   };
 
   const fetchCitations = async () => {

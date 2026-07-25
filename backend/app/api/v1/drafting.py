@@ -144,7 +144,10 @@ async def _rag_stream(req: GenerateRequest):
         combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
         yield "event: status\ndata: Rewriting queries...\n\n"
 
-        queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter)
+        queries = await rewrite_queries(
+            combined_facts, req.document_type, req.subject_matter,
+            document_type_key=req.document_type_key or "",
+        )
         combined_query = " ".join(queries[:3])
 
         # ── Stages 2 & 3: Fan-out Hybrid Retrieval (3 corpora in parallel) ──
@@ -399,7 +402,11 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
         except Exception as e:
             print(f"suggest-citations cache read error: {e}")
 
-    queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter, search_hint=req.search_hint)
+    queries = await rewrite_queries(
+        combined_facts, req.document_type, req.subject_matter,
+        search_hint=req.search_hint,
+        document_type_key=req.document_type_key or "",
+    )
     # Rerank query must stay short: the cross-encoder truncates query+passage at
     # ~512 tokens, so joining all 7 queries drowned the passage and produced
     # near-random scores. The first 3 queries carry the statutory + procedural core.
