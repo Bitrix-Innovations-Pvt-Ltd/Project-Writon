@@ -55,6 +55,55 @@ async def preload_models():
     asyncio.create_task(get_model())
 
 
+@app.on_event("startup")
+async def keep_db_warm():
+    """
+    Periodically runs one cheap ANN query per vector corpus so Neon's compute
+    never autosuspends and the ivfflat/hnsw index pages stay in page cache.
+
+    Without this, the first Step 6 request after idle pays compute wake-up +
+    cold page reads on every vector query (~7s each instead of ~0.3s) and can
+    take minutes. Interval must stay below Neon's autosuspend window (5 min).
+
+    Set RAG_KEEPWARM_INTERVAL_SECONDS=0 to disable (saves Neon compute hours
+    at the cost of cold-start latency).
+    """
+    interval = int(os.getenv("RAG_KEEPWARM_INTERVAL_SECONDS", "240"))
+    if interval <= 0:
+        return
+
+    async def _loop():
+        from sqlalchemy import text
+        from app.core.database import engine
+
+        warm_sqls = [
+            # ORDER BY distance forces a real index scan → warms index pages
+            """SELECT jc.id FROM judgment_chunks jc
+               ORDER BY jc.embedding <=> (SELECT embedding FROM judgment_chunks
+                                          WHERE embedding IS NOT NULL LIMIT 1)
+               LIMIT 1""",
+            """SELECT j.id FROM judgments j
+               ORDER BY j.embedding <=> (SELECT embedding FROM judgments
+                                         WHERE embedding IS NOT NULL LIMIT 1)
+               LIMIT 1""",
+            """SELECT lcs.id FROM legal_code_sections lcs
+               ORDER BY lcs.embedding <=> (SELECT embedding FROM legal_code_sections
+                                           WHERE embedding IS NOT NULL LIMIT 1)
+               LIMIT 1""",
+        ]
+        while True:
+            try:
+                async with engine.connect() as conn:
+                    await conn.execute(text("SET LOCAL ivfflat.probes = 20"))
+                    for sql in warm_sqls:
+                        await conn.execute(text(sql))
+            except Exception as e:
+                print(f"[keep-warm] ping failed (non-fatal): {e}")
+            await asyncio.sleep(interval)
+
+    asyncio.create_task(_loop())
+
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}

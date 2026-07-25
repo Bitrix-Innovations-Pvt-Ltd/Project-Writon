@@ -402,11 +402,14 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
         except Exception as e:
             print(f"suggest-citations cache read error: {e}")
 
+    import time
+    t_start = time.time()
     queries = await rewrite_queries(
         combined_facts, req.document_type, req.subject_matter,
         search_hint=req.search_hint,
         document_type_key=req.document_type_key or "",
     )
+    t_rewrite = time.time()
     # Rerank query must stay short: the cross-encoder truncates query+passage at
     # ~512 tokens, so joining all 7 queries drowned the passage and produced
     # near-random scores. The first 3 queries carry the statutory + procedural core.
@@ -467,6 +470,7 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
         print(f"Retrieval error: {e}")
         judgment_results, merged_statutes = [], []
         
+    t_retrieval = time.time()
     print(f"DEBUG - Queries: {queries}")
     print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
     print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
@@ -476,6 +480,14 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
         combined_query,
         groups={"judgments": judgment_results[:25], "statutes": merged_statutes[:25]},
         top_ks={"judgments": 8, "statutes": 8},
+    )
+    t_done = time.time()
+    # Stage timing — when a user reports a slow Step 6, this line names the stage
+    print(
+        f"[suggest-citations timing] total={t_done - t_start:.1f}s "
+        f"rewrite={t_rewrite - t_start:.1f}s "
+        f"retrieval={t_retrieval - t_rewrite:.1f}s "
+        f"rerank={t_done - t_retrieval:.1f}s"
     )
 
     result = {
