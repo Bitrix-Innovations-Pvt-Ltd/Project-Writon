@@ -170,14 +170,22 @@ async def load_reranker():
         async with _reranker_lock:
             if _reranker is None:
                 print("Loading cross-encoder reranker (ms-marco-MiniLM-L-6-v2)...")
+                import inspect
                 from sentence_transformers import CrossEncoder
-                import os
                 cache_dir = os.environ.get("SENTENCE_TRANSFORMERS_HOME") or None
-                _reranker = CrossEncoder(
-                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                    device="cpu",
-                    cache_dir=cache_dir
-                )
+                # sentence-transformers <4 uses cache_dir; >=4 renamed it to
+                # cache_folder — passing the wrong one raises TypeError and
+                # silently disables reranking, so pick by signature.
+                kwargs = {"device": "cpu"}
+                if cache_dir:
+                    params = inspect.signature(CrossEncoder.__init__).parameters
+                    if "cache_folder" in params:
+                        kwargs["cache_folder"] = cache_dir
+                    elif "cache_dir" in params:
+                        kwargs["cache_dir"] = cache_dir
+                # Load in the main thread: HF model loading inside a worker
+                # thread crashes with torch 2.6 meta-tensor errors (see search.py).
+                _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", **kwargs)
                 print("Cross-encoder reranker loaded.")
     return _reranker
 
@@ -185,10 +193,17 @@ async def load_reranker():
 # ---------------------------------------------------------------------------
 # Internal helper: run raw SQL on a dedicated pool connection (safe for gather)
 # ---------------------------------------------------------------------------
-async def _exec_raw(engine, sql: str, params: dict) -> list:
+async def _exec_raw(engine, sql: str, params: dict, presql: str = None) -> list:
     async with engine.connect() as conn:
+        if presql:
+            await conn.execute(text(presql))
         result = await conn.execute(text(sql), params)
         return result.fetchall()
+
+
+# ivfflat scans `probes` of the index's lists; the default (1) trades too much
+# recall for speed on the 1000-list judgment_chunks index.
+_VEC_PRESQL = "SET LOCAL ivfflat.probes = 20"
 
 
 # ===========================================================================
@@ -716,222 +731,232 @@ async def retrieve_judgment_chunks(
        Winner chunks are expanded with ±1 neighbouring chunks for richer LLM context.
        Holding prefix omitted when the chunk itself IS the holding paragraph.
     """
-    # all_results keys on judgment_id → best result dict for that judgment
-    all_results: dict = {}
-
     # Derive case_type filter for citation context
     case_type_filter = _derive_case_type_filter(document_type_key, subject_matter) if document_type_key else []
     sem_weight = 1.5 if context == "citations" else 1.0
     kw_weight  = 1.5 if context == "citations" else 2.0
 
-    for query in queries:
-        try:
-            if query_vectors and query in query_vectors:
-                vec_list = query_vectors[query]
-            elif embedding_fn:
-                loop = asyncio.get_event_loop()
-                vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
-                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-            else:
-                continue
+    # ── Case-type filter clause (constant across queries) ────────────────
+    ct_filter_sql = ""
+    params_shared: dict = {}
+    if case_type_filter and context == "citations":
+        ct_filter_sql = " AND (j.case_type = ANY(:case_types) OR j.case_type IS NULL)"
+        params_shared["case_types"] = case_type_filter
 
-            # ── Case-type filter clause ──────────────────────────────────
-            ct_filter_sql = ""
-            params_shared: dict = {}
-            if case_type_filter and context == "citations":
-                ct_filter_sql = " AND (j.case_type = ANY(:case_types) OR j.case_type IS NULL)"
-                params_shared["case_types"] = case_type_filter
+    async def _run_query(query: str):
+        """Hybrid (vector + BM25) retrieval for one rewritten query."""
+        if query_vectors and query in query_vectors:
+            vec_list = query_vectors[query]
+        elif embedding_fn:
+            loop = asyncio.get_event_loop()
+            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
+            vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+        else:
+            return [], []
 
-            # ── Vector (semantic) search ─────────────────────────────────
-            if USE_CHUNKS:
-                # FIX 3: Select jc.chunk_text separately (raw paragraph) so we can pass
-                # it to the cross-encoder independently of the holding-prefixed LLM text.
-                # FIX 1+2: We alias jc.judgment_id AS id so RRF keys on judgment level.
-                #           chunk_id is preserved separately to enable context expansion.
-                vector_sql = f"""
-                    SELECT jc.id          AS chunk_id,
-                           jc.judgment_id AS id,
-                           jc.chunk_index,
-                           jc.chunk_text  AS raw_chunk_text,
-                           j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                           COALESCE(j.holding, '')    AS holding,
-                           COALESCE(j.summary, '')    AS summary,
-                           jc.paragraph_number_start,
-                           jc.paragraph_number_end,
-                           jc.embedding <-> :q_vec AS distance
-                    FROM   judgment_chunks jc
-                    JOIN   judgments j ON j.id = jc.judgment_id
-                    WHERE  jc.embedding IS NOT NULL
-                    {ct_filter_sql}
-                    ORDER  BY distance
-                    LIMIT  30
-                """
-            else:
-                # Phase 1 — full-doc embedding (current state)
-                vector_sql = f"""
-                    SELECT j.id,
-                           j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                           COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                               || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                           j.embedding <-> :q_vec AS distance
-                    FROM   judgments j
-                    WHERE  j.embedding IS NOT NULL
-                    {ct_filter_sql}
-                    ORDER  BY distance
-                    LIMIT  30
-                """
-
-            # ── Keyword (BM25) search — always queries judgments table ──
-            # BM25 results give us the document-level context (summary + holding + full_text).
-            ts_config = _get_ts_config(query)
-            keyword_sql = f"""
+        # ── Vector (semantic) search ─────────────────────────────────
+        if USE_CHUNKS:
+            # FIX 3: Select jc.chunk_text separately (raw paragraph) so we can pass
+            # it to the cross-encoder independently of the holding-prefixed LLM text.
+            # FIX 1+2: We alias jc.judgment_id AS id so RRF keys on judgment level.
+            #           chunk_id is preserved separately to enable context expansion.
+            vector_sql = f"""
+                SELECT jc.id          AS chunk_id,
+                       jc.judgment_id AS id,
+                       jc.chunk_index,
+                       jc.chunk_text  AS raw_chunk_text,
+                       j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                       COALESCE(j.holding, '')    AS holding,
+                       COALESCE(j.summary, '')    AS summary,
+                       jc.paragraph_number_start,
+                       jc.paragraph_number_end,
+                       jc.embedding <=> :q_vec AS distance
+                FROM   judgment_chunks jc
+                JOIN   judgments j ON j.id = jc.judgment_id
+                WHERE  jc.embedding IS NOT NULL
+                {ct_filter_sql}
+                ORDER  BY distance
+                LIMIT  30
+            """
+        else:
+            # Phase 1 — full-doc embedding (current state)
+            vector_sql = f"""
                 SELECT j.id,
                        j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
                        COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
                            || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                       ts_rank(j.search_vector,
-                           to_tsquery('{{ts_config}}',
-                               regexp_replace(
-                                   websearch_to_tsquery('{{ts_config}}', :q)::text,
-                                   ' & ', ' | ', 'g'
-                               )
-                           )
-                       ) AS rank_score
+                       j.embedding <=> :q_vec AS distance
                 FROM   judgments j
-                WHERE  j.search_vector @@ websearch_to_tsquery('{{ts_config}}', :q)
-                {{ct_filter_sql}}
-                ORDER  BY rank_score DESC
+                WHERE  j.embedding IS NOT NULL
+                {ct_filter_sql}
+                ORDER  BY distance
                 LIMIT  30
-            """.format(ts_config=ts_config, ct_filter_sql=ct_filter_sql)
+            """
 
-            vec_params = {"q_vec": str(vec_list), **params_shared}
-            kw_params  = {"q": query, **params_shared}
+        # ── Keyword (BM25) search — always queries judgments table ──
+        # BM25 results give us the document-level context (summary + holding + full_text).
+        ts_config = _get_ts_config(query)
+        keyword_sql = f"""
+            SELECT j.id,
+                   j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                   COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                       || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
+                   ts_rank(j.search_vector,
+                       to_tsquery('{ts_config}',
+                           regexp_replace(
+                               websearch_to_tsquery('{ts_config}', :q)::text,
+                               ' & ', ' | ', 'g'
+                           )
+                       )
+                   ) AS rank_score
+            FROM   judgments j
+            WHERE  j.search_vector @@ websearch_to_tsquery('{ts_config}', :q)
+            {ct_filter_sql}
+            ORDER  BY rank_score DESC
+            LIMIT  30
+        """
 
-            try:
-                vec_rows, kw_rows = await asyncio.gather(
-                    _exec_raw(engine, vector_sql, vec_params),
-                    _exec_raw(engine, keyword_sql, kw_params)
-                )
+        vec_params = {"q_vec": str(vec_list), **params_shared}
+        kw_params  = {"q": query, **params_shared}
 
-                # ── Typo / Concept OR Fallback ────────────────────────────────
-                if len(kw_rows) < 5:
-                    words = [w for w in re.split(r'\W+', query) if len(w) > 2]
-                    if len(words) > 1:
-                        or_query = " | ".join(words)
-                        fallback_sql = f"""
-                            SELECT j.id,
-                                   j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                                   COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                                       || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                                   ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
-                            FROM   judgments j
-                            WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
-                            {ct_filter_sql}
-                            ORDER  BY rank_score DESC
-                            LIMIT  30
-                        """
-                        try:
-                            kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})
-                        except Exception as fallback_err:
-                            print(f"[retrieve_judgment_chunks] OR Fallback SQL error: {fallback_err}")
+        try:
+            vec_rows, kw_rows = await asyncio.gather(
+                _exec_raw(engine, vector_sql, vec_params, presql=_VEC_PRESQL),
+                _exec_raw(engine, keyword_sql, kw_params)
+            )
 
-            except Exception as sql_err:
-                print(f"[retrieve_judgments] SQL error for query '{query}': {sql_err}")
-                vec_rows = await _exec_raw(engine, vector_sql, vec_params)
-                kw_rows = []
+            # ── Typo / Concept OR Fallback ────────────────────────────────
+            if len(kw_rows) < 5:
+                words = [w for w in re.split(r'\W+', query) if len(w) > 2]
+                if len(words) > 1:
+                    or_query = " | ".join(words)
+                    fallback_sql = f"""
+                        SELECT j.id,
+                               j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+                               COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                                   || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
+                               ts_rank_cd(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                        FROM   judgments j
+                        WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
+                        {ct_filter_sql}
+                        ORDER  BY rank_score DESC
+                        LIMIT  30
+                    """
+                    try:
+                        kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})
+                    except Exception as fallback_err:
+                        print(f"[retrieve_judgment_chunks] OR Fallback SQL error: {fallback_err}")
 
-            # ── RRF fusion (Fixes 1 + 2) ──────────────────────────────────
-            # FIX 2: Only keep FIRST occurrence of each judgment_id in vec_rows.
-            #         vec_rows is ORDER BY distance ASC, so first = best chunk.
-            vec_row_data: dict = {}   # judgment_id → best chunk row (from vector search)
-            sem_ranks: dict = {}      # judgment_id → 1-based rank of best chunk
-            for idx, r in enumerate(vec_rows):
-                jid = r.id  # aliased as judgment_id
-                if jid not in sem_ranks:
-                    sem_ranks[jid] = idx + 1
-                    vec_row_data[jid] = r   # Only keep the best-ranked chunk per judgment
+        except Exception as sql_err:
+            print(f"[retrieve_judgments] SQL error for query '{query}': {sql_err}")
+            vec_rows = await _exec_raw(engine, vector_sql, vec_params, presql=_VEC_PRESQL)
+            kw_rows = []
 
-            # FIX 1: kw_row_data stays separate — BM25 rows use judgments.id directly
-            #         and must NEVER overwrite the precise chunk text from vec_row_data.
-            kw_row_data: dict = {r.id: r for r in kw_rows}
-            kw_ranks: dict    = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
+        return vec_rows, kw_rows
 
-            all_ids = set(sem_ranks) | set(kw_ranks)
+    # All 7 rewritten queries run concurrently — they were previously sequential,
+    # which multiplied per-query DB latency by the number of queries.
+    query_results = await asyncio.gather(
+        *(_run_query(q) for q in queries), return_exceptions=True
+    )
 
-            for jid in all_ids:
-                rrf = 0.0
-                if jid in sem_ranks: rrf += sem_weight / (60 + sem_ranks[jid])
-                if jid in kw_ranks:  rrf += kw_weight  / (60 + kw_ranks[jid])
-                if jid not in all_results or rrf > all_results[jid]["score"]:
-                    # FIX 1: Prefer the precise chunk row; fall back to BM25 row
-                    row = vec_row_data.get(jid) or kw_row_data.get(jid)
-                    if row is None:
-                        continue
+    # ── RRF fusion — SUM contributions across queries ────────────────────
+    # A judgment surfaced by several of the 7 query angles is far more likely
+    # to be on-point than one surfaced once, so scores accumulate (previously
+    # only the single best query's score was kept).
+    scores: dict = {}         # judgment_id → accumulated RRF score
+    best_vec_row: dict = {}   # judgment_id → (best sem rank, best chunk row)
+    kw_row_data: dict = {}    # judgment_id → BM25 row (document-level context)
 
-                    title = f"{row.petitioner} v. {row.respondent}" if row.petitioner else "Unknown"
+    for qr in query_results:
+        if isinstance(qr, BaseException):
+            print(f"Judgment retrieval error: {qr}")
+            continue
+        vec_rows, kw_rows = qr
+        # FIX 2: Only the FIRST occurrence of each judgment_id per query counts.
+        #        vec_rows is ORDER BY distance ASC, so first = best chunk.
+        seen_this_query = set()
+        for idx, r in enumerate(vec_rows):
+            jid = r.id  # aliased as judgment_id
+            if jid in seen_this_query:
+                continue
+            seen_this_query.add(jid)
+            scores[jid] = scores.get(jid, 0.0) + sem_weight / (60 + idx + 1)
+            if jid not in best_vec_row or (idx + 1) < best_vec_row[jid][0]:
+                best_vec_row[jid] = (idx + 1, r)
+        # FIX 1: kw rows stay separate — BM25 rows use judgments.id directly
+        #        and must NEVER overwrite the precise chunk text from vector rows.
+        for idx, r in enumerate(kw_rows):
+            scores[r.id] = scores.get(r.id, 0.0) + kw_weight / (60 + idx + 1)
+            kw_row_data.setdefault(r.id, r)
 
-                    if USE_CHUNKS and jid in vec_row_data:
-                        # FIX 3 + IMPROVEMENT 5: Build two distinct text representations:
-                        #   chunk_text  → raw paragraph only (for cross-encoder: precise, short)
-                        #   text        → holding-prefixed chunk (for LLM prompt: context-rich)
-                        raw_chunk  = (getattr(row, "raw_chunk_text", "") or "")
-                        holding    = (getattr(row, "holding", "") or "")
-                        summary    = (getattr(row, "summary", "") or "")
-                        para_start = getattr(row, "paragraph_number_start", None)
-                        para_end   = getattr(row, "paragraph_number_end", None)
+    all_results: dict = {}
+    for jid, rrf in scores.items():
+        # FIX 1: Prefer the precise chunk row; fall back to BM25 row
+        row = best_vec_row[jid][1] if jid in best_vec_row else kw_row_data.get(jid)
+        if row is None:
+            continue
 
-                        para_label = ""
-                        if para_start is not None:
-                            if para_start == para_end:
-                                para_label = f"[Para {para_start}] "
-                            else:
-                                para_label = f"[Para {para_start}-{para_end}] "
+        title = f"{row.petitioner} v. {row.respondent}" if row.petitioner else "Unknown"
 
-                        # IMPROVEMENT 5: Only prefix holding when this chunk is NOT the holding paragraph.
-                        # Heuristic: if the chunk text overlaps significantly with the holding, skip prefix.
-                        holding_words = set(holding.lower().split()) if holding else set()
-                        chunk_words   = set(raw_chunk.lower().split()[:50]) if raw_chunk else set()
-                        is_holding_chunk = len(holding_words & chunk_words) > 20  # >20 common words = same paragraph
+        if USE_CHUNKS and jid in best_vec_row:
+            # FIX 3 + IMPROVEMENT 5: Build two distinct text representations:
+            #   chunk_text  → raw paragraph only (for cross-encoder: precise, short)
+            #   text        → holding-prefixed chunk (for LLM prompt: context-rich)
+            raw_chunk  = (getattr(row, "raw_chunk_text", "") or "")
+            holding    = (getattr(row, "holding", "") or "")
+            para_start = getattr(row, "paragraph_number_start", None)
+            para_end   = getattr(row, "paragraph_number_end", None)
 
-                        if holding and not is_holding_chunk:
-                            holding_prefix = f"HOLDING: {holding[:250]}\n\n"
-                        else:
-                            holding_prefix = ""
+            para_label = ""
+            if para_start is not None:
+                if para_start == para_end:
+                    para_label = f"[Para {para_start}] "
+                else:
+                    para_label = f"[Para {para_start}-{para_end}] "
 
-                        llm_text   = holding_prefix + para_label + raw_chunk[:900]
-                        xenc_text  = raw_chunk[:500]  # Short + precise for cross-encoder
+            # IMPROVEMENT 5: Only prefix holding when this chunk is NOT the holding paragraph.
+            # Heuristic: if the chunk text overlaps significantly with the holding, skip prefix.
+            holding_words = set(holding.lower().split()) if holding else set()
+            chunk_words   = set(raw_chunk.lower().split()[:50]) if raw_chunk else set()
+            is_holding_chunk = len(holding_words & chunk_words) > 20  # >20 common words = same paragraph
 
-                        all_results[jid] = {
-                            "id":          jid,
-                            "score":       rrf,
-                            "text":        llm_text,        # For LLM prompt assembly
-                            "chunk_text":  xenc_text,       # For cross-encoder (Fix 3)
-                            "chunk_id":    getattr(row, "chunk_id", None),
-                            "chunk_index": getattr(row, "chunk_index", None),
-                            "case_number": row.case_number or "",
-                            "title":       title,
-                            "year":        row.year,
-                            "case_type":   getattr(row, "case_type", "") or "",
-                            "holding":     holding[:300],
-                            "corpus":      "judgment",
-                        }
-                    else:
-                        # Phase 1 path (USE_CHUNKS=False) or BM25-only result
-                        kw_row = kw_row_data.get(jid)
-                        all_results[jid] = {
-                            "id":         jid,
-                            "score":      rrf,
-                            "text":       (getattr(kw_row, "chunk_text", "") or "")[:1000] if kw_row else "",
-                            "chunk_text": "",
-                            "case_number": row.case_number or "",
-                            "title":       title,
-                            "year":        row.year,
-                            "case_type":   getattr(row, "case_type", "") or "",
-                            "corpus":      "judgment",
-                        }
+            if holding and not is_holding_chunk:
+                holding_prefix = f"HOLDING: {holding[:250]}\n\n"
+            else:
+                holding_prefix = ""
 
-        except Exception as e:
-            print(f"Judgment retrieval error for query '{query}': {e}")
+            llm_text   = holding_prefix + para_label + raw_chunk[:900]
+            xenc_text  = raw_chunk[:500]  # Short + precise for cross-encoder
+
+            all_results[jid] = {
+                "id":          jid,
+                "score":       rrf,
+                "text":        llm_text,        # For LLM prompt assembly
+                "chunk_text":  xenc_text,       # For cross-encoder (Fix 3)
+                "chunk_id":    getattr(row, "chunk_id", None),
+                "chunk_index": getattr(row, "chunk_index", None),
+                "case_number": row.case_number or "",
+                "title":       title,
+                "year":        row.year,
+                "case_type":   getattr(row, "case_type", "") or "",
+                "holding":     holding[:300],
+                "corpus":      "judgment",
+            }
+        else:
+            # Phase 1 path (USE_CHUNKS=False) or BM25-only result
+            kw_row = kw_row_data.get(jid)
+            all_results[jid] = {
+                "id":         jid,
+                "score":      rrf,
+                "text":       (getattr(kw_row, "chunk_text", "") or "")[:1000] if kw_row else "",
+                "chunk_text": "",
+                "case_number": row.case_number or "",
+                "title":       title,
+                "year":        row.year,
+                "case_type":   getattr(row, "case_type", "") or "",
+                "corpus":      "judgment",
+            }
 
     winners = sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:30]
 
@@ -998,6 +1023,114 @@ async def retrieve_judgment_chunks(
 
 
 
+# ── Exact section-reference extraction ─────────────────────────────────────
+# When a rewritten query explicitly names a provision ("Section 438 CrPC",
+# "Section 45 of the Prevention of Money Laundering Act", "Article 21"),
+# that section is looked up directly and boosted above fuzzy matches —
+# fuzzy hybrid search alone often ranks a neighbouring section higher.
+_ACT_NAME_TO_SHORT_CODE = [
+    # Longest / most specific names first so they win the substring scan
+    ("bharatiya nagarik suraksha sanhita", "BNSS"),
+    ("bharatiya nyaya sanhita", "BNS"),
+    ("bharatiya sakshya adhiniyam", "BSA"),
+    ("code of criminal procedure", "CrPC"),
+    ("criminal procedure code", "CrPC"),
+    ("code of civil procedure", "CPC"),
+    ("civil procedure code", "CPC"),
+    ("indian penal code", "IPC"),
+    ("indian evidence act", "IEA"),
+    ("evidence act", "IEA"),
+    ("constitution of india", "COI"),
+    ("indian contract act", "CONTRACT"),
+    ("contract act", "CONTRACT"),
+    ("sale of goods act", "SALE"),
+    ("partnership act", "PARTNERSHIP"),
+    ("companies act", "COMPANIES"),
+    ("insolvency and bankruptcy code", "IBC"),
+    ("negotiable instruments act", "NI"),
+    ("transfer of property act", "TPA"),
+    ("registration act", "REGISTRATION"),
+    ("easements act", "EASEMENTS"),
+    ("specific relief act", "SRA"),
+    ("hindu marriage act", "HMA"),
+    ("hindu succession act", "HSA"),
+    ("arbitration and conciliation act", "ARBITRATION"),
+    ("arbitration act", "ARBITRATION"),
+    ("sarfaesi", "SARFAESI"),
+    ("recovery of debts", "RDB"),
+    ("consumer protection act", "CPA"),
+    ("income-tax act", "ITAX"),
+    ("income tax act", "ITAX"),
+    ("central goods and services tax", "CGST"),
+    ("integrated goods and services tax", "IGST"),
+    ("prevention of corruption act", "PC"),
+    ("prevention of money laundering act", "PMLA"),
+    ("juvenile justice", "JJ"),
+    ("protection of children from sexual offences", "POCSO"),
+    ("domestic violence act", "DV"),
+    ("sexual harassment of women at workplace", "POSH"),
+    ("information technology act", "IT"),
+    ("right to information act", "RTI"),
+    ("land acquisition", "LARR"),
+    ("industrial relations code", "IR"),
+    ("code on wages", "WAGES"),
+    # Bare abbreviations last (matched as whole words below)
+    ("bnss", "BNSS"), ("bns", "BNS"), ("bsa", "BSA"), ("crpc", "CrPC"),
+    ("ipc", "IPC"), ("cpc", "CPC"), ("iea", "IEA"), ("ibc", "IBC"),
+    ("pmla", "PMLA"), ("pocso", "POCSO"), ("sra", "SRA"), ("hma", "HMA"),
+    ("cgst", "CGST"), ("ni act", "NI"), ("coi", "COI"),
+]
+
+_SECTION_REF_RE = re.compile(
+    r"[Ss]ections?\s+(\d+[A-Za-z]{0,2})(?:\s*\([0-9A-Za-z]+\))?"   # 438, 41A, 13(2)
+    r"[\s,]*(?:of\s+(?:the\s+)?)?"
+    r"([A-Za-z][A-Za-z ,\.\-()]{0,70})?"                            # trailing act name
+)
+_ARTICLE_REF_RE = re.compile(r"[Aa]rticles?\s+(\d+[A-Za-z]?(?:-[A-Za-z])?)")
+
+
+def _extract_section_refs(queries: list) -> set:
+    """Return {(section_number, short_code)} explicitly referenced in queries."""
+    refs = set()
+    for q in queries:
+        for m in _SECTION_REF_RE.finditer(q):
+            sec, tail = m.group(1), (m.group(2) or "").lower()
+            for name, code in _ACT_NAME_TO_SHORT_CODE:
+                # Whole-word check so 'ipc' doesn't match inside another word
+                if re.search(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", tail):
+                    refs.add((sec, code))
+                    break
+        for m in _ARTICLE_REF_RE.finditer(q):
+            refs.add((m.group(1), "COI"))
+    return refs
+
+
+async def _lookup_exact_sections(engine, refs: set, coi_only: bool) -> list:
+    """Direct lookups for explicitly-referenced sections; bypasses domain filter."""
+    if coi_only:
+        refs = {(s, c) for s, c in refs if c == "COI"}
+    if not refs:
+        return []
+    rows = []
+    for sec, code in list(refs)[:12]:
+        try:
+            hit = await _exec_raw(
+                engine,
+                """
+                    SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code
+                    FROM   legal_code_sections lcs
+                    JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+                    WHERE  lc.short_code = :code AND lcs.section_number = :sec
+                    LIMIT  1
+                """,
+                {"code": code, "sec": sec},
+            )
+            rows.extend(hit)
+        except Exception as e:
+            print(f"[retrieve_statutes] Exact lookup failed for {sec} {code}: {e}")
+    return rows
+
+
 async def retrieve_statutes(
     engine,
     queries: list,
@@ -1013,7 +1146,6 @@ async def retrieve_statutes(
     When document_type_key is provided and context='citations', filters to relevant statute codes.
     coi_only filters to Constitution of India (legal_code_id=7) — takes precedence over code filter.
     """
-    all_results = {}
     sem_weight = 1.5 if context == "citations" else 1.0
     kw_weight  = 1.5 if context == "citations" else 2.0
 
@@ -1030,93 +1162,119 @@ async def retrieve_statutes(
             code_filter_sql = " AND lc.domains && cast(:allowed_domains as varchar[])"
             code_params["allowed_domains"] = relevant_domains
 
-    for query in queries:
+    async def _run_query(query: str):
+        """Hybrid (vector + BM25) retrieval for one rewritten query."""
+        if query_vectors and query in query_vectors:
+            vec_list = query_vectors[query]
+        elif embedding_fn:
+            loop = asyncio.get_event_loop()
+            vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
+            vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+        else:
+            return [], []
+
+        vector_sql = f"""
+            SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
+                   lcs.embedding <=> :q_vec AS distance
+            FROM   legal_code_sections lcs
+            JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+            WHERE  lcs.embedding IS NOT NULL {code_filter_sql}
+            ORDER  BY distance
+            LIMIT  30
+        """
+
+        ts_config = _get_ts_config(query)
+        keyword_sql = f"""
+            SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
+                   ts_rank(lcs.search_vector,
+                                    websearch_to_tsquery('{ts_config}', :q)) AS rank_score
+            FROM   legal_code_sections lcs
+            JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+            WHERE  lcs.search_vector @@ websearch_to_tsquery('{ts_config}', :q) {code_filter_sql}
+            ORDER  BY rank_score DESC
+            LIMIT  30
+        """
+
+        vec_params = {"q_vec": str(vec_list), **code_params}
+        kw_params  = {"q": query, **code_params}
+
         try:
-            if query_vectors and query in query_vectors:
-                vec_list = query_vectors[query]
-            elif embedding_fn:
-                loop = asyncio.get_event_loop()
-                vec = await loop.run_in_executor(_cpu_executor, embedding_fn, query)
-                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-            else:
-                continue
+            vec_rows, kw_rows = await asyncio.gather(
+                _exec_raw(engine, vector_sql, vec_params, presql=_VEC_PRESQL),
+                _exec_raw(engine, keyword_sql, kw_params)
+            )
 
-            vector_sql = f"""
-                SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
-                       lcs.embedding <-> :q_vec AS distance
-                FROM   legal_code_sections lcs
-                JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
-                WHERE  lcs.embedding IS NOT NULL {code_filter_sql}
-                ORDER  BY distance
-                LIMIT  30
-            """
+            # ── Typo / Concept OR Fallback ────────────────────────────────
+            if len(kw_rows) < 5:
+                words = [w for w in re.split(r'\W+', query) if len(w) > 2]
+                if len(words) > 1:
+                    or_query = " | ".join(words)
+                    fallback_sql = f"""
+                        SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
+                               ts_rank_cd(lcs.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+                        FROM   legal_code_sections lcs
+                        JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+                        WHERE  lcs.search_vector @@ to_tsquery('{ts_config}', :or_q) {code_filter_sql}
+                        ORDER  BY rank_score DESC
+                        LIMIT  30
+                    """
+                    try:
+                        kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **code_params})
+                    except Exception as fallback_err:
+                        print(f"[retrieve_statutes] OR Fallback SQL error: {fallback_err}")
+        except Exception as sql_err:
+            print(f"[retrieve_statutes] SQL error for query '{query}': {sql_err}")
+            vec_rows = await _exec_raw(engine, vector_sql, vec_params, presql=_VEC_PRESQL)
+            kw_rows = []
 
-            ts_config = _get_ts_config(query)
-            keyword_sql = f"""
-                SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
-                       ts_rank(lcs.search_vector,
-                                        websearch_to_tsquery('{{ts_config}}', :q)) AS rank_score
-                FROM   legal_code_sections lcs
-                JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
-                WHERE  lcs.search_vector @@ websearch_to_tsquery('{{ts_config}}', :q) {{code_filter_sql}}
-                ORDER  BY rank_score DESC
-                LIMIT  30
-            """.format(ts_config=ts_config, code_filter_sql=code_filter_sql)
+        return vec_rows, kw_rows
 
-            vec_params = {"q_vec": str(vec_list), **code_params}
-            kw_params  = {"q": query, **code_params}
+    # All queries in parallel + exact section-reference lookups alongside
+    exact_task = _lookup_exact_sections(engine, _extract_section_refs(queries), coi_only)
+    gathered = await asyncio.gather(
+        *(_run_query(q) for q in queries), exact_task, return_exceptions=True
+    )
+    exact_rows = gathered[-1] if not isinstance(gathered[-1], BaseException) else []
+    query_results = gathered[:-1]
 
-            try:
-                vec_rows, kw_rows = await asyncio.gather(
-                    _exec_raw(engine, vector_sql, vec_params),
-                    _exec_raw(engine, keyword_sql, kw_params)
-                )
-                
-                # ── Typo / Concept OR Fallback ────────────────────────────────
-                if len(kw_rows) < 5:
-                    import re
-                    words = [w for w in re.split(r'\W+', query) if len(w) > 2]
-                    if len(words) > 1:
-                        or_query = " | ".join(words)
-                        fallback_sql = f"""
-                            SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code,
-                                   ts_rank_cd(lcs.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
-                            FROM   legal_code_sections lcs
-                            JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
-                            WHERE  lcs.search_vector @@ to_tsquery('{ts_config}', :or_q) {code_filter_sql}
-                            ORDER  BY rank_score DESC
-                            LIMIT  30
-                        """
-                        try:
-                            kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **code_params})
-                        except Exception as fallback_err:
-                            print(f"[retrieve_statutes] OR Fallback SQL error: {fallback_err}")
-            except Exception as sql_err:
-                print(f"[retrieve_statutes] SQL error for query '{query}': {sql_err}")
-                vec_rows = await _exec_raw(engine, vector_sql, vec_params)
-                kw_rows = []
+    # ── RRF fusion — SUM contributions across queries (consensus ranking) ──
+    scores: dict = {}
+    row_data: dict = {}
+    for qr in query_results:
+        if isinstance(qr, BaseException):
+            print(f"Statute retrieval error: {qr}")
+            continue
+        vec_rows, kw_rows = qr
+        for idx, r in enumerate(vec_rows):
+            scores[r.id] = scores.get(r.id, 0.0) + sem_weight / (60 + idx + 1)
+            row_data.setdefault(r.id, r)
+        for idx, r in enumerate(kw_rows):
+            scores[r.id] = scores.get(r.id, 0.0) + kw_weight / (60 + idx + 1)
+            row_data.setdefault(r.id, r)
 
-            sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
-            kw_ranks  = {r.id: idx + 1 for idx, r in enumerate(kw_rows)}
-            all_ids   = set(sem_ranks) | set(kw_ranks)
-            row_data  = {r.id: r for r in (list(vec_rows) + list(kw_rows))}
+    # ── Exact-reference boost — a provision named in a query must surface ──
+    # 0.5 is far above any achievable fused RRF score, so exact refs sort first
+    # while preserving relative order among themselves via the fuzzy score.
+    exact_ids = set()
+    for r in exact_rows:
+        scores[r.id] = scores.get(r.id, 0.0) + 0.5
+        row_data.setdefault(r.id, r)
+        exact_ids.add(r.id)
 
-            for sid in all_ids:
-                rrf = 0.0
-                if sid in sem_ranks: rrf += sem_weight / (60 + sem_ranks[sid])
-                if sid in kw_ranks:  rrf += kw_weight  / (60 + kw_ranks[sid])
-                if sid not in all_results or rrf > all_results[sid]["score"]:
-                    row = row_data[sid]
-                    all_results[sid] = {
-                        "id": sid, "score": rrf,
-                        "text": (row.section_text or "")[:800],
-                        "title": f"Section {row.section_number} {row.title or ''} ({row.short_code})",
-                        "short_code": row.short_code or "",
-                        "section_number": row.section_number or "",
-                        "corpus": "statute"
-                    }
-        except Exception as e:
-            print(f"Statute retrieval error for query '{query}': {e}")
+    all_results = {}
+    for sid, rrf in scores.items():
+        row = row_data[sid]
+        # Constitution provisions are Articles, not Sections
+        provision = "Article" if (row.short_code or "") == "COI" else "Section"
+        all_results[sid] = {
+            "id": sid, "score": rrf,
+            "text": (row.section_text or "")[:800],
+            "title": f"{provision} {row.section_number} {row.title or ''} ({row.short_code})",
+            "short_code": row.short_code or "",
+            "section_number": row.section_number or "",
+            "exact_match": sid in exact_ids,
+            "corpus": "statute"
+        }
 
     return sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:30]
 
@@ -1200,7 +1358,7 @@ async def retrieve_court_rules(
                 vector_sql = """
                     SELECT id, chapter_number, chapter_title,
                            rule_number, rule_subsection, rule_text,
-                           embedding <-> :q_vec AS distance
+                           embedding <=> :q_vec AS distance
                     FROM court_rule_sections
                     WHERE court_identity_id = :cid
                       AND chapter_number = ANY(:ch)
@@ -1220,7 +1378,7 @@ async def retrieve_court_rules(
                     LIMIT 10
                 """
                 vec_rows, kw_rows = await asyncio.gather(
-                    _exec_raw(engine, vector_sql, {"q_vec": str(vec_list), "cid": court_identity_id, "ch": optional_chapters}),
+                    _exec_raw(engine, vector_sql, {"q_vec": str(vec_list), "cid": court_identity_id, "ch": optional_chapters}, presql=_VEC_PRESQL),
                     _exec_raw(engine, keyword_sql, {"q": query, "cid": court_identity_id, "ch": optional_chapters}),
                 )
                 sem_ranks = {r.id: idx + 1 for idx, r in enumerate(vec_rows)}
@@ -1295,14 +1453,22 @@ async def rerank_candidates(
         # RRF scores are typically ~0.04 for high relevance. Multiply by 100 to map to the 0-5 scale the UI expects.
         candidates = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
         filtered = []
+        seen_keys = set()
         if candidates:
             max_score = candidates[0].get("score", 0.0)
             for c in candidates:
                 s = c.get("score", 0.0)
-                if s < 0.015:  # Absolute noise cutoff
+                if not c.get("exact_match"):
+                    if s < 0.015:  # Absolute noise cutoff
+                        continue
+                    if s < max_score * 0.5:  # Relative drop-off (50% drop from the best result)
+                        continue
+                # The judgments corpus contains duplicate rows under different
+                # ids — drop repeats of the same case (title + year).
+                key = ((c.get("title") or "").strip().lower(), c.get("year"))
+                if key[0] and key in seen_keys:
                     continue
-                if s < max_score * 0.5:  # Relative drop-off (50% drop from the best result)
-                    continue
+                seen_keys.add(key)
                 c["rerank_score"] = s * 100
                 filtered.append(c)
         return filtered[:top_k]
@@ -1329,14 +1495,21 @@ async def rerank_candidates(
         reranked = sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
         
         filtered = []
+        seen_keys = set()
         if reranked:
             max_score = reranked[0].get("rerank_score", 0.0)
             for c in reranked:
                 s = c.get("rerank_score", 0.0)
                 # Cross encoder scores are usually logits (e.g. -10 to +10).
                 # Removed absolute cutoff because logits can be negative even for the best match.
-                if s < max_score - 2.0:  # Relative drop-off for logits (tightened from 3.0)
+                # Explicitly-cited sections (exact_match) always survive the filter.
+                if s < max_score - 2.0 and not c.get("exact_match"):
                     continue
+                # Drop duplicate cases (same title + year under different ids)
+                key = ((c.get("title") or "").strip().lower(), c.get("year"))
+                if key[0] and key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 filtered.append(c)
                 
         return filtered[:top_k]

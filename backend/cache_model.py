@@ -17,9 +17,13 @@ print("Legal-BERT cached successfully.")
 
 
 print("Pre-downloading Cross-Encoder model weights...")
-reranker = CrossEncoder(
-    "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    cache_dir="/model_cache",
-    automodel_args={"low_cpu_mem_usage": False},
-)
+# sentence-transformers <4 uses cache_dir/automodel_args; >=4 renamed them to
+# cache_folder/model_kwargs — select by signature so both pins work.
+import inspect
+_ce_params = inspect.signature(CrossEncoder.__init__).parameters
+if "cache_folder" in _ce_params:
+    _ce_kwargs = {"cache_folder": "/model_cache", "model_kwargs": {"low_cpu_mem_usage": False}}
+else:
+    _ce_kwargs = {"cache_dir": "/model_cache", "automodel_args": {"low_cpu_mem_usage": False}}
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", **_ce_kwargs)
 print("Cross-Encoder cached successfully.")

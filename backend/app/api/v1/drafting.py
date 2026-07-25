@@ -32,24 +32,16 @@ from app.core.rag import (
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
 
-# Lazy reference to Legal-BERT — shared with search.py via the singleton there
-_sentence_model = None
-_model_lock = asyncio.Lock()
-
-
 async def _get_embedding_fn():
-    """Returns a sync callable that encodes a string to a vector using Legal-BERT."""
-    global _sentence_model
-    if _sentence_model is None:
-        async with _model_lock:
-            if _sentence_model is None:
-                from sentence_transformers import SentenceTransformer
-                loop = asyncio.get_event_loop()
-                _sentence_model = await loop.run_in_executor(
-                    None,
-                    lambda: SentenceTransformer("nlpaueb/legal-bert-base-uncased")
-                )
-    return _sentence_model.encode
+    """Returns a sync callable that encodes a string to a vector using Legal-BERT.
+
+    Reuses the singleton from search.py (preloaded at startup) instead of
+    loading a second ~400MB copy — the previous executor-based load here also
+    risked the torch 2.6 meta-tensor crash on background-thread model loading.
+    """
+    from app.api.v1.search import get_model
+    model = await get_model()
+    return model.encode
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +183,11 @@ async def _rag_stream(req: GenerateRequest):
             # coi_results is [] when coi_task was the no-op asyncio.sleep(0)
             if not isinstance(coi_results, list):
                 coi_results = []
-            # Merge statutes + COI (deduplicate by id)
+            # Merge statutes + COI by score (deduplicate by id) so COI hits
+            # compete on rank instead of being appended past the slice window
             seen_ids = set()
             merged_statutes = []
-            for item in statute_results + coi_results:
+            for item in sorted(statute_results + coi_results, key=lambda x: x["score"], reverse=True):
                 if item["id"] not in seen_ids:
                     merged_statutes.append(item)
                     seen_ids.add(item["id"])
@@ -340,11 +333,14 @@ async def suggest_citations(req: GenerateRequest):
     combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{req.mandatory_paragraphs}\n{uploaded_docs_context}".strip()
     
     queries = await rewrite_queries(combined_facts, req.document_type, req.subject_matter, search_hint=req.search_hint)
-    combined_query = " ".join(queries)  # Use all queries for reranking
+    # Rerank query must stay short: the cross-encoder truncates query+passage at
+    # ~512 tokens, so joining all 7 queries drowned the passage and produced
+    # near-random scores. The first 3 queries carry the statutory + procedural core.
+    combined_query = " ".join(queries[:3])
 
     try:
         embedding_fn = await _get_embedding_fn()
-        
+
         # OPTIMIZATION: Batch compute all vectors once instead of sequentially
         from app.core.rag import _cpu_executor
         loop = asyncio.get_event_loop()
@@ -365,19 +361,31 @@ async def suggest_citations(req: GenerateRequest):
             context="citations",
             query_vectors=query_vectors
         )
-        coi_task      = retrieve_statutes(
-            engine, queries, None, coi_only=True,
-            document_type_key=req.document_type_key,
-            context="citations",
-            query_vectors=query_vectors
+        # Only query the COI corpus when the subject matter is constitutionally
+        # relevant (same gating as /generate) — the unconditional COI wave was
+        # both wasted latency and Article noise in the suggestions.
+        sm_lower_check = req.subject_matter.lower() if req.subject_matter else ""
+        needs_coi = any(kw in sm_lower_check for kw in _SUBJECT_NEEDS_COI)
+        coi_task = (
+            retrieve_statutes(
+                engine, queries, None, coi_only=True,
+                document_type_key=req.document_type_key,
+                context="citations",
+                query_vectors=query_vectors
+            )
+            if needs_coi else asyncio.sleep(0)
         )
 
         judgment_results, statute_results, coi_results = await asyncio.gather(
             judgment_task, statute_task, coi_task
         )
+        if not isinstance(coi_results, list):
+            coi_results = []
+        # Merge by retrieval score so COI hits compete on rank instead of being
+        # appended after 30 statutes and silently cut off by the [:25] slice.
         seen_ids = set()
         merged_statutes = []
-        for item in statute_results + coi_results:
+        for item in sorted(statute_results + coi_results, key=lambda x: x["score"], reverse=True):
             if item["id"] not in seen_ids:
                 merged_statutes.append(item)
                 seen_ids.add(item["id"])
