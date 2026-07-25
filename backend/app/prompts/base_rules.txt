@@ -68,4 +68,13 @@ STRICT RULES (apply to every document):
 
 11. PRAYER CLAUSE FIDELITY: The Prayer clause (inside the PRAYER section) MUST reproduce the FULL text of the RELIEF SOUGHT field verbatim, including ALL qualifying phrases such as "along with interest", "from the date of order", "pendente lite and finally", "with costs", etc. Do NOT summarize, paraphrase, or truncate any part of the relief. If the relief has multiple sub-clauses (a), (b), (c) — retain all of them exactly as written.
 
-12. SIGNATURE BLOCK — ONE OCCURRENCE ONLY: The advocate signature block (PLACE: ___ / DATED: ___ / Advocate name / Enrollment No. / Counsel for Petitioner) MUST appear EXACTLY ONCE in the entire document — at the very end of the PRAYER section, after the relief clauses. Do NOT include it in any other section (SYNOPSIS, LIST_OF_DATES, MAIN_PETITION, AFFIDAVIT, VAKALATNAMA, ANNEXURES, or any other). Adding the signature block to multiple sections is a critical formatting violation.
+12. SIGNATURE BLOCK — MANDATORY AT END OF EVERY SECTION: The advocate signature block MUST appear at the end of EVERY section in the document. Use this exact markdown table format at the bottom of each section (no borders, two columns — left: PLACE/DATED, right: advocate details right-aligned):
+
+| | |
+|:---|---:|
+| PLACE: ______________ | **(ADVOCATE NAME)** |
+| DATED: ______________ | Advocate |
+| | Enrollment No. ENROLLMENT_NO |
+| | Counsel for Petitioner |
+
+Replace ADVOCATE NAME with the actual advocate name from CASE DETAILS (or `____________________` if not provided). Replace ENROLLMENT_NO with the actual enrollment number (or `_______________` if not provided). This block is MANDATORY inside EVERY section — COVER_AND_INDEX, SYNOPSIS, LIST_OF_DATES, MAIN_PETITION, PRAYER, AFFIDAVIT, VAKALATNAMA, and ANNEXURES. Do NOT omit it from any section.
