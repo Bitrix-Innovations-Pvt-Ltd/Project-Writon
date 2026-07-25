@@ -124,15 +124,21 @@ def _derive_case_type_filter(document_type_key: str, subject_matter: str) -> lis
     return base
 
 
+def _kw_match(keywords: list, text: str) -> bool:
+    """Word-boundary keyword matching — bare substring checks caused false
+    positives like 'pay' matching inside 'payment' (service-law hijack)."""
+    return any(re.search(r"\b" + re.escape(kw) + r"\b", text) for kw in keywords)
+
+
 def _derive_statute_domains(document_type_key: str, subject_matter: str = "") -> list:
     """Return preferred statute domains for this document type and subject matter."""
     domains = list(_DOC_TYPE_DOMAINS.get(document_type_key, []))
     sm_lower = subject_matter.lower() if subject_matter else ""
-    
+
     # Add constitutional domain when the subject matter actually touches constitutional provisions
     # OR when it's a service matter, as Writ Petitions for service matters rely heavily on COI
     needs_coi = any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI)
-    is_service = any(kw in sm_lower for kw in _SUBJECT_SERVICE_LAW_KEYWORDS)
+    is_service = _kw_match(_SUBJECT_SERVICE_LAW_KEYWORDS, sm_lower)
     
     if "constitutional" not in domains and (needs_coi or is_service):
         domains.append("constitutional")
@@ -278,7 +284,10 @@ async def rewrite_queries(
             "Pankaj Bansal v UOI (written grounds of arrest), P Chidambaram v ED."
         )
     # ── POCSO Bail / Charge framing ──────────────────────────────────────────
-    elif "pocso" in doc_lower or ("bail" in doc_lower and "pocso" in sm_lower) or "charge" in doc_lower:
+    # NOTE: requires POCSO context in doc type or subject matter — a bare
+    # '"charge" in doc_lower' previously hijacked every Discharge Application
+    # (disCHARGE) into POCSO queries.
+    elif "pocso" in doc_lower or (("bail" in doc_lower or "charge" in doc_lower) and "pocso" in sm_lower):
         doc_hint = (
             "This is a POCSO-related application (bail / charge framing / discharge). "
             "Ensure queries target: (a) POCSO Act Sections 7, 8, 9, 10 — penetrative / aggravated sexual assault, "
@@ -287,6 +296,17 @@ async def rewrite_queries(
             "(d) charge framing standard — Section 228 CrPC / 251 BNSS prima facie test, "
             "(e) discharge — Section 227 CrPC / 250 BNSS — no sufficient grounds, "
             "(f) precedents: Alakh Alok Srivastava v UOI, Neeraj Sharma v State, State of MP v Madan Lal."
+        )
+    # ── Discharge / Charge-framing (generic, non-POCSO) ──────────────────────
+    elif "discharge" in doc_lower or "charge sheet" in doc_lower or "charge framing" in doc_lower:
+        doc_hint = (
+            "This is a discharge / charge-framing stage application. "
+            "Ensure queries target: (a) Section 227/239 CrPC / Section 250/262 BNSS — discharge when no sufficient ground, "
+            "(b) Section 228/240 CrPC / Section 251/263 BNSS — charge framing prima facie standard, "
+            "(c) scope of sifting evidence at charge stage — no mini-trial, "
+            "(d) precedents: Union of India v Prafulla Kumar Samal, Dilawar Balu Kurane v State of Maharashtra, "
+            "Sajjan Kumar v CBI, State of Karnataka v L. Muniswamy, "
+            "(e) if bail is also sought, Section 437/439 CrPC / 480/483 BNSS bail grounds."
         )
     # ── Anticipatory Bail ─────────────────────────────────────────────────────
     elif "anticipatory bail" in doc_lower:
@@ -353,9 +373,9 @@ async def rewrite_queries(
             "(b) the specific relief (mandamus, certiorari, prohibition, quo warranto), "
         )
         # ── Pay / ACP / Salary / Arrears (service pay matters) ──────────────
-        if any(kw in sm_lower for kw in ["pay", "salary", "acp", "assured career progression",
-                                          "grade pay", "pay scale", "arrear", "increment",
-                                          "pay fixation", "pay revision", "allowance"]):
+        if _kw_match(["pay", "salary", "acp", "assured career progression",
+                      "grade pay", "pay scale", "arrear", "increment",
+                      "pay fixation", "pay revision", "allowance"], sm_lower):
             doc_hint += (
                 "(c) ACP / MACP Assured Career Progression scheme — pay upgradation on completion of service years, "
                 "(d) pay fixation rules — Fundamental Rules, CCS (RP) Rules, Pay Commission recommendations, "
@@ -426,8 +446,8 @@ async def rewrite_queries(
     elif "slp" in doc_lower or "special leave" in doc_lower:
         # Subject-matter-aware SLP hints
         slp_sm_hint = ""
-        if any(kw in sm_lower for kw in ["pay", "salary", "acp", "service", "employment",
-                                          "pension", "promotion", "seniority"]):
+        if _kw_match(["pay", "salary", "acp", "service", "employment",
+                      "pension", "promotion", "seniority"], sm_lower):
             slp_sm_hint = (
                 "Focus specifically on: service law SLP — pay fixation, ACP/MACP arrears, "
                 "non-implementation of government order, Section 14/19 Administrative Tribunals Act, "
@@ -629,7 +649,7 @@ async def rewrite_queries(
             "Deepali Gundu Surwase v Kranti Junior Adhyapak Mahavidyalaya."
         )
     # ── Divorce / Custody / Maintenance Petition ──────────────────────────────
-    elif any(kw in doc_lower for kw in ["divorce", "custody", "maintenance petition", "domestic violence", "matrimonial"]):
+    elif any(kw in doc_lower for kw in ["divorce", "custody", "maintenance petition", "maintenance application", "domestic violence", "matrimonial"]):
         doc_hint = (
             "This is a matrimonial / family law petition. "
             "Ensure queries target: (a) Hindu Marriage Act 1955 / Special Marriage Act 1954 — grounds for divorce (cruelty, desertion, adultery), "
