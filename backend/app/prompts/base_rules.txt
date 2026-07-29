@@ -72,45 +72,44 @@ STRICT RULES (apply to every document):
 
 <style>
 .petition-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    margin-top: 80px;
-    width: 100%;
-    font-family: "Times New Roman", serif;
-    font-size: 18px;
+display: flex;
+justify-content: space-between;
+align-items: flex-end;
+margin-top: 80px;
+width: 100%;
+font-family: "Times New Roman", serif;
+font-size: 18px;
 }
 
 .footer-left p,
 .footer-right p {
-    margin: 4px 0;
+margin: 4px 0;
 }
 
 .footer-right {
-    text-align: center;
-    width: 280px;
+text-align: center;
+width: 280px;
 }
 
 .signature-line {
-    width: 250px;
-    border-top: 1.5px solid #000;
-    margin: 0 auto 8px;
+width: 250px;
+border-top: 1.5px solid #000;
+margin: 0 auto 8px;
 }
 </style>
 
 <footer class="petition-footer">
-    <div class="footer-left">
-        <p><strong>PLACE:</strong> __________________</p>
-        <p><strong>DATED:</strong> __________________</p>
-    </div>
-
-    <div class="footer-right">
-        <div class="signature-line"></div>
-        <p><strong>ADVOCATE NAME</strong></p>
-        <p>Advocate</p>
-        <p><strong>Enrollment No.</strong> ENROLLMENT_NO</p>
-        <p>Counsel for Petitioner</p>
-    </div>
+<div class="footer-left">
+<p><strong>PLACE:</strong> __________________</p>
+<p><strong>DATED:</strong> __________________</p>
+</div>
+<div class="footer-right">
+<div class="signature-line"></div>
+<p><strong>ADVOCATE NAME</strong></p>
+<p>Advocate</p>
+<p><strong>Enrollment No.</strong> ENROLLMENT_NO</p>
+<p>Counsel for Petitioner</p>
+</div>
 </footer>
 
 Replace ADVOCATE NAME with the actual advocate name from CASE DETAILS (or `____________________` if not provided). Replace ENROLLMENT_NO with the actual enrollment number (or `_______________` if not provided). This block is MANDATORY inside EVERY section — COVER_AND_INDEX, SYNOPSIS, LIST_OF_DATES, MAIN_PETITION, PRAYER, AFFIDAVIT, VAKALATNAMA, and ANNEXURES. Do NOT omit it from any section.
