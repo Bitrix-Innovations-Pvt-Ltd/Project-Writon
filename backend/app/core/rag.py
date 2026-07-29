@@ -2,16 +2,21 @@
 core/rag.py — Multi-Corpus Hybrid RAG Pipeline for Step 6 (Generate)
 
 Stages:
-  1. Query Rewriting       (GPT-4o-mini) — expanded doc-type hints for all types
+  1. Query Rewriting       (GPT-4o-mini) — doc-type hints resolved from the
+         doc_type_retrieval_hints table (see scripts/seed_retrieval_config.py)
   2 & 3. Fan-out Hybrid Retrieval  (BM25 + pgvector + RRF, parallel, 3 corpora)
-         — USE_CHUNKS flag: False=judgments table (now), True=judgment_chunks (after pipeline)
+         — USE_CHUNKS flag: False=judgments table, True=judgment_chunks
          — context-aware RRF weights: 'citations' mode uses balanced 1.5x each
          — subject-matter case_type + statute_code filters for citation context
-  4. Cross-Encoder Reranking (ms-marco-MiniLM-L-6-v2)
-         — re-enabled for suggest-citations (use_cross_encoder=True)
+  4. Reranking — cross-encoder (ms-marco-MiniLM-L-6-v2) by default, or the
+         LLM listwise reranker when RAG_LLM_RERANK=1 (scores against raw facts)
          — bypassed for streaming /generate to prevent proxy timeouts
   5. Context Assembly
   6. Citation Verification (post-generation, regex + SQL)
+
+All retrieval configuration (doc-type hints, case-type/domain maps, COI and
+service-law keyword lists, act-name aliases) lives in the database, not in this
+module — reseed with scripts/seed_retrieval_config.py after editing.
 """
 
 import asyncio
@@ -46,82 +51,69 @@ USE_CHUNKS = True
 
 
 # ===========================================================================
-# Subject-matter helpers — derive case_type + statute code filters
+# Runtime retrieval configuration — loaded from the DB, not hardcoded.
+# Tables: retrieval_config, doc_type_retrieval_hints, legal_codes.aliases
+# (seeded by scripts/seed_retrieval_config.py). Cached in-process with a TTL
+# so hint/config edits go live without a deploy; on load failure the last
+# good copy is kept (empty degrades to "no filters + generic hint").
 # ===========================================================================
+import time as _time
 
-# Maps document_type_key → likely judgment case_type values in DB
-_DOC_TYPE_CASE_TYPES: dict = {
-    "writ_petition_civil":    ["Writ Petition", "Civil Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Review Petition", "Curative Petition", "Original Suit", "Appeal", "Slp"],
-    "writ_petition_criminal": ["Writ Petition", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Review Petition", "Curative Petition", "Appeal", "Slp"],
-    "bail_application":       ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"],
-    "anticipatory_bail":      ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"],
-    "civil_appeal":           ["Civil Appeal", "Special Leave Petition", "Transfer Petition", "Appeal", "Review Petition", "Curative Petition", "Slp"],
-    "criminal_appeal":        ["Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Appeal", "Review Petition", "Curative Petition", "Slp"],
-    "writ_petition":          ["Writ Petition", "Civil Appeal", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Review Petition", "Curative Petition", "Original Suit", "Appeal", "Slp"],
-}
-
-_DOC_TYPE_DOMAINS: dict = {
-    "writ_petition_civil":    ["civil", "constitutional"],
-    "writ_petition_criminal": ["criminal", "constitutional"],
-    "bail_application":       ["criminal"],
-    "anticipatory_bail":      ["criminal"],
-    "civil_appeal":           ["civil", "constitutional"],
-    "criminal_appeal":        ["criminal", "constitutional"],
-    "writ_petition":          ["civil", "criminal", "constitutional"],
-}
-
-# Subject-matter keywords that warrant adding COI to statute retrieval
-_SUBJECT_NEEDS_COI = [
-    "fundamental right", "article 14", "article 16", "article 19", "article 21",
-    "article 226", "article 32", "constitutional", "equality", "liberty",
-    "discrimination", "natural justice", "article 311", "article 300",
-]
-
-# Subject-matter keywords that warrant adding service-law related codes
-_SUBJECT_SERVICE_LAW_KEYWORDS = [
-    "service", "employment", "pay", "salary", "allowance", "promotion",
-    "acp", "assured career progression", "increment", "pension", "arrear",
-    "seniority", "transfer", "posting", "disciplinary", "dismissal",
-    "termination", "reinstatement", "back wage", "grade pay", "pay scale",
-    "pay fixation", "pay revision", "dpc", "department", "government employee",
-]
-
-# Keyword-based overrides for subject matter
-_SUBJECT_CASE_TYPE_OVERRIDES = [
-    ("service law",   ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("property",      ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Original Suit", "Appeal", "Slp"]),
-    ("land",          ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Original Suit", "Appeal", "Slp"]),
-    ("labour",        ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("employment",    ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("cheque",        ["Criminal Appeal", "Civil Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("matrimonial",   ["Civil Appeal", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Appeal", "Slp"]),
-    ("divorce",       ["Civil Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Appeal", "Slp"]),
-    ("custody",       ["Civil Appeal", "Criminal Appeal", "Special Leave Petition", "Transfer Petition", "Petition", "Appeal", "Slp"]),
-    ("company",       ["Civil Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("insolvency",    ["Civil Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("ibc",           ["Civil Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("tax",           ["Civil Appeal", "Writ Petition", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("consumer",      ["Civil Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("rape",          ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("murder",        ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("dowry",         ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("corruption",    ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("ndps",          ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-    ("pocso",         ["Criminal Appeal", "Special Leave Petition", "Petition", "Appeal", "Slp"]),
-]
+_RT_CFG_TTL = int(os.getenv("RAG_CONFIG_TTL_SECONDS", "300"))
+_rt_cfg = {"ts": 0.0, "config": {}, "hints": [], "aliases": [], "loaded": False}
 
 
-def _derive_case_type_filter(document_type_key: str, subject_matter: str) -> list:
-    """Return case_type values to filter judgments by, or [] for no filter."""
-    base = list(_DOC_TYPE_CASE_TYPES.get(document_type_key, []))
-    if subject_matter:
-        sm_lower = subject_matter.lower()
-        for keyword, types in _SUBJECT_CASE_TYPE_OVERRIDES:
-            if keyword in sm_lower:
-                for t in types:
-                    if t not in base:
-                        base.append(t)
-    return base
+async def _get_runtime_config(engine=None) -> dict:
+    now = _time.time()
+    if _rt_cfg["loaded"] and now - _rt_cfg["ts"] < _RT_CFG_TTL:
+        return _rt_cfg
+    if engine is None:
+        from app.core.database import engine as _engine
+        engine = _engine
+    try:
+        cfg_rows = await _exec_raw(engine, "SELECT key, value FROM retrieval_config", {})
+        config = {}
+        for r in cfg_rows:
+            v = r.value
+            if isinstance(v, str):
+                # Driver-dependent: jsonb may arrive already-decoded (a plain
+                # string value) or as raw JSON text — only parse the latter.
+                try:
+                    v = json.loads(v)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            config[r.key] = v
+
+        hint_rows = await _exec_raw(
+            engine,
+            """SELECT priority, keywords_any, keywords_all, subject_keywords_any, hint_text
+               FROM doc_type_retrieval_hints ORDER BY priority""",
+            {},
+        )
+        hints = [dict(r._mapping) for r in hint_rows]
+
+        alias_rows = await _exec_raw(
+            engine, "SELECT short_code, code_name, aliases FROM legal_codes", {}
+        )
+        aliases = []
+        for r in alias_rows:
+            names = set(a.lower() for a in (r.aliases or []))
+            names.add((r.code_name or "").lower().split(",")[0].strip())
+            for name in names:
+                if name:
+                    aliases.append((name, r.short_code))
+        # Longest names first so the most specific act name wins the scan
+        aliases.sort(key=lambda x: len(x[0]), reverse=True)
+
+        _rt_cfg.update(ts=now, config=config, hints=hints, aliases=aliases, loaded=True)
+        global _ts_simple_abbrevs
+        abbrevs = config.get("ts_simple_abbrevs")
+        if abbrevs:
+            _ts_simple_abbrevs = {a.upper() for a in abbrevs}
+    except Exception as e:
+        print(f"[rag-config] load failed (using previous copy): {e}")
+        _rt_cfg["ts"] = now  # don't hammer a broken DB every call
+    return _rt_cfg
 
 
 def _kw_match(keywords: list, text: str) -> bool:
@@ -130,20 +122,63 @@ def _kw_match(keywords: list, text: str) -> bool:
     return any(re.search(r"\b" + re.escape(kw) + r"\b", text) for kw in keywords)
 
 
-def _derive_statute_domains(document_type_key: str, subject_matter: str = "") -> list:
+def _derive_case_type_filter(config: dict, document_type_key: str, subject_matter: str) -> list:
+    """Return case_type values to filter judgments by, or [] for no filter."""
+    base = list((config.get("doc_type_case_types") or {}).get(document_type_key, []))
+    if subject_matter:
+        sm_lower = subject_matter.lower()
+        for keyword, types in (config.get("subject_case_type_overrides") or []):
+            if _kw_match([keyword], sm_lower):
+                for t in types:
+                    if t not in base:
+                        base.append(t)
+    return base
+
+
+def _derive_statute_domains(config: dict, document_type_key: str, subject_matter: str = "") -> list:
     """Return preferred statute domains for this document type and subject matter."""
-    domains = list(_DOC_TYPE_DOMAINS.get(document_type_key, []))
+    domains = list((config.get("doc_type_domains") or {}).get(document_type_key, []))
     sm_lower = subject_matter.lower() if subject_matter else ""
 
-    # Add constitutional domain when the subject matter actually touches constitutional provisions
-    # OR when it's a service matter, as Writ Petitions for service matters rely heavily on COI
-    needs_coi = any(kw in sm_lower for kw in _SUBJECT_NEEDS_COI)
-    is_service = _kw_match(_SUBJECT_SERVICE_LAW_KEYWORDS, sm_lower)
-    
+    # Constitutional domain when the subject touches constitutional provisions,
+    # or for service matters (service writs rely heavily on COI)
+    needs_coi = any(kw in sm_lower for kw in (config.get("subject_needs_coi") or []))
+    is_service = _kw_match(config.get("service_law_keywords") or [], sm_lower)
+
     if "constitutional" not in domains and (needs_coi or is_service):
         domains.append("constitutional")
 
     return domains
+
+
+def _resolve_doc_hint(hints: list, doc_haystack: str, sm_lower: str):
+    """First hint row (by priority) whose keyword conditions all hold, or None."""
+    for row in hints:
+        kw_all = row.get("keywords_all") or []
+        kw_any = row.get("keywords_any") or []
+        if not kw_all and not kw_any:
+            continue
+        if kw_all and not all(_kw_match([k], doc_haystack) for k in kw_all):
+            continue
+        if kw_any and not _kw_match(kw_any, doc_haystack):
+            continue
+        subj = row.get("subject_keywords_any") or []
+        if subj and not _kw_match(subj, sm_lower):
+            continue
+        return row["hint_text"]
+    return None
+
+
+async def subject_needs_coi(subject_matter: str, engine=None) -> bool:
+    """True when the subject matter warrants querying the COI corpus."""
+    cfg = await _get_runtime_config(engine)
+    sm_lower = (subject_matter or "").lower()
+    return any(kw in sm_lower for kw in (cfg["config"].get("subject_needs_coi") or []))
+
+
+# Fallback abbreviation set; overwritten from retrieval_config on first load
+_ts_simple_abbrevs = {"IPC", "BNS", "CRPC", "BNSS", "COI", "SCC", "AIR",
+                      "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "BSA"}
 
 
 def _get_ts_config(query: str) -> str:
@@ -151,10 +186,8 @@ def _get_ts_config(query: str) -> str:
     Return 'simple' for abbreviation-heavy queries so Indian legal terms
     (IPC, CrPC, BNSS etc.) are not stripped by the 'english' stop-word list.
     """
-    abbrevs = {"IPC", "BNS", "CRPC", "BNSS", "COI", "SCC", "AIR",
-               "CPC", "SRA", "NDPS", "POCSO", "IBC", "GST", "CBI", "BSA"}
     words = query.strip().upper().split()
-    if any(w in abbrevs for w in words) or len(words) <= 3:
+    if any(w in _ts_simple_abbrevs for w in words) or len(words) <= 3:
         return "simple"
     return "english"
 
@@ -199,10 +232,12 @@ async def load_reranker():
 # ---------------------------------------------------------------------------
 # Internal helper: run raw SQL on a dedicated pool connection (safe for gather)
 # ---------------------------------------------------------------------------
-async def _exec_raw(engine, sql: str, params: dict, presql: str = None) -> list:
+async def _exec_raw(engine, sql: str, params: dict, presql=None) -> list:
+    """presql: a SET LOCAL statement, or a list of them, run before the query."""
     async with engine.connect() as conn:
         if presql:
-            await conn.execute(text(presql))
+            for stmt in ([presql] if isinstance(presql, str) else presql):
+                await conn.execute(text(stmt))
         result = await conn.execute(text(sql), params)
         return result.fetchall()
 
@@ -211,8 +246,23 @@ async def _exec_raw(engine, sql: str, params: dict, presql: str = None) -> list:
 # ivfflat scans `probes` of the index's lists; the pgvector default (1) trades
 # too much recall for speed on the 1000-list judgment_chunks index.
 # 20 = accuracy-first (user accepted a 20-25s latency budget on 2026-07-25).
+# hnsw.ef_search applies once the corpus indexes are HNSW (scripts/
+# create_hnsw_indexes.py); both settings are harmless on the other index type.
 IVFFLAT_PROBES = int(os.getenv("RAG_IVFFLAT_PROBES", "20"))
-_VEC_PRESQL = f"SET LOCAL ivfflat.probes = {IVFFLAT_PROBES}"
+HNSW_EF_SEARCH = int(os.getenv("RAG_HNSW_EF_SEARCH", "40"))
+# Iterative scan is REQUIRED for correctness, not tuning: without it pgvector
+# takes the top ef_search neighbours and only then applies the WHERE clause, so
+# a case-type-filtered judgment search returned ZERO semantic rows whenever the
+# nearest chunks fell outside the allowed case types — the semantic half of
+# retrieval was silently dead and results came from BM25 alone. strict_order
+# keeps exact distance ordering; max_scan_tuples bounds the worst case.
+HNSW_MAX_SCAN_TUPLES = int(os.getenv("RAG_HNSW_MAX_SCAN_TUPLES", "20000"))
+_VEC_PRESQL = [
+    f"SET LOCAL ivfflat.probes = {IVFFLAT_PROBES}",
+    f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}",
+    "SET LOCAL hnsw.iterative_scan = strict_order",
+    f"SET LOCAL hnsw.max_scan_tuples = {HNSW_MAX_SCAN_TUPLES}",
+]
 
 # OR-fallback for the judgments corpus: rescues keyword misses for case-name
 # queries. Enabled by default, but bounded — it only fires for queries that
@@ -227,10 +277,36 @@ _CASE_NAME_RE = re.compile(r"\bv\.?s?\.?\b", re.IGNORECASE)
 def _looks_like_case_name(query: str) -> bool:
     return bool(_CASE_NAME_RE.search(query))
 
+
+# Party-name tokens: capitalised, not generic legal vocabulary. ORing every
+# word of a case-name query instead matched 98.7% of the judgments corpus and
+# cost ~47s; only distinctive names may widen the search.
+_PROPER_NOUN_RE = re.compile(r"\b[A-Z][A-Za-z'&.\-]{2,}\b")
+MAX_OR_TERMS = int(os.getenv("RAG_MAX_OR_TERMS", "6"))
+# Hard ceiling so a pathological keyword query can never eat the request budget
+OR_FALLBACK_TIMEOUT_MS = int(os.getenv("RAG_OR_FALLBACK_TIMEOUT_MS", "4000"))
+
+
+def _case_name_terms(query: str, stopwords: set) -> list:
+    """Distinctive proper-noun tokens from a case-name query, most-specific first."""
+    terms, seen = [], set()
+    for tok in _PROPER_NOUN_RE.findall(query):
+        key = tok.lower().strip(".")
+        if len(key) < 4 or key in stopwords or key in seen:
+            continue
+        seen.add(key)
+        terms.append(tok)
+    return terms[:MAX_OR_TERMS]
+
 # Number of rewritten queries to fan out (5-7). Benchmarked 2026-07-25
 # (scripts/evaluate_step6.py): 5 beat 7 on BOTH precision and latency —
 # the extra query angles mostly injected noise into the RRF fusion.
 NUM_QUERIES = int(os.getenv("RAG_NUM_QUERIES", "5"))
+
+# The case_type filter narrows the judgment corpus by ~77% for a bail matter.
+# Its source data is unreliable (Bhajan Lal is filed as "Civil Appeal"), so it
+# is kept switchable for A/B evaluation rather than assumed to be a net win.
+CASE_TYPE_FILTER_ENABLED = os.getenv("RAG_CASE_TYPE_FILTER", "1") == "1"
 
 # Model used for query rewriting (Stage 1).
 REWRITE_MODEL = os.getenv("RAG_REWRITE_MODEL", "openai/gpt-4o-mini")
@@ -257,453 +333,27 @@ async def rewrite_queries(
     if not openrouter_key:
         return [facts[:200]]
 
+    cfg = await _get_runtime_config()
     doc_lower = f"{(document_type_key or '').replace('_', ' ')} {doc_type}".lower().strip()
     sm_lower  = subject_matter.lower()
 
-    # ── Build a rich, doc-type-aware hint covering all document types ─────
-    doc_hint = ""
-
-    # ── NDPS Bail (Sec. 37 twin conditions) — checked BEFORE generic bail ──
-    if "ndps" in doc_lower or "37 ndps" in doc_lower or ("bail" in doc_lower and "ndps" in sm_lower):
-        doc_hint = (
-            "This is a bail application under Section 37 of the NDPS Act. "
-            "Ensure queries target: (a) Section 37 NDPS twin conditions — satisfaction that accused not guilty AND unlikely to commit offence, "
-            "(b) gravity of commercial-quantity charge vs small-quantity distinction, "
-            "(c) Section 20/21/22 NDPS Act — offence and punishment, "
-            "(d) landmark NDPS bail precedents: Union of India v Thamisharasi, Tofan Singh v State of Tamil Nadu, "
-            "Mohd. Muslim @ Hussain v State (NCT of Delhi)."
-        )
-    # ── PMLA Bail (Sec. 45 twin conditions) — checked BEFORE generic bail ──
-    elif "pmla" in doc_lower or "money laundering" in doc_lower or "ecir" in doc_lower or ("bail" in doc_lower and "pmla" in sm_lower):
-        doc_hint = (
-            "This is a bail application under Section 45 of the Prevention of Money Laundering Act, 2002. "
-            "Ensure queries target: (a) Section 45 PMLA twin conditions — reasonable grounds to believe not guilty AND not likely to commit offence, "
-            "(b) Section 3/4 PMLA — offence of money laundering and attachment, "
-            "(c) Enforcement Case Information Report (ECIR) vs FIR — arrest procedure, "
-            "(d) landmark PMLA bail precedents: Vijay Madanlal Choudhary v UOI, Pavana Dibbur v ED, "
-            "Pankaj Bansal v UOI (written grounds of arrest), P Chidambaram v ED."
-        )
-    # ── POCSO Bail / Charge framing ──────────────────────────────────────────
-    # NOTE: requires POCSO context in doc type or subject matter — a bare
-    # '"charge" in doc_lower' previously hijacked every Discharge Application
-    # (disCHARGE) into POCSO queries.
-    elif "pocso" in doc_lower or (("bail" in doc_lower or "charge" in doc_lower) and "pocso" in sm_lower):
-        doc_hint = (
-            "This is a POCSO-related application (bail / charge framing / discharge). "
-            "Ensure queries target: (a) POCSO Act Sections 7, 8, 9, 10 — penetrative / aggravated sexual assault, "
-            "(b) Section 29 POCSO — presumption of guilt, "
-            "(c) Section 439 CrPC / 483 BNSS bail alongside Section 37-A POCSO restrictions, "
-            "(d) charge framing standard — Section 228 CrPC / 251 BNSS prima facie test, "
-            "(e) discharge — Section 227 CrPC / 250 BNSS — no sufficient grounds, "
-            "(f) precedents: Alakh Alok Srivastava v UOI, Neeraj Sharma v State, State of MP v Madan Lal."
-        )
-    # ── Discharge / Charge-framing (generic, non-POCSO) ──────────────────────
-    elif "discharge" in doc_lower or "charge sheet" in doc_lower or "charge framing" in doc_lower:
-        doc_hint = (
-            "This is a discharge / charge-framing stage application. "
-            "Ensure queries target: (a) Section 227/239 CrPC / Section 250/262 BNSS — discharge when no sufficient ground, "
-            "(b) Section 228/240 CrPC / Section 251/263 BNSS — charge framing prima facie standard, "
-            "(c) scope of sifting evidence at charge stage — no mini-trial, "
-            "(d) precedents: Union of India v Prafulla Kumar Samal, Dilawar Balu Kurane v State of Maharashtra, "
-            "Sajjan Kumar v CBI, State of Karnataka v L. Muniswamy, "
-            "(e) if bail is also sought, Section 437/439 CrPC / 480/483 BNSS bail grounds."
-        )
-    # ── Anticipatory Bail ─────────────────────────────────────────────────────
-    elif "anticipatory bail" in doc_lower:
-        doc_hint = (
-            "This is an anticipatory bail application. "
-            "Ensure queries target: (a) Section 438 CrPC / Section 482 BNSS anticipatory bail grounds, "
-            "(b) factors for grant/refusal (flight risk, evidence tampering, gravity of offence), "
-            "(c) landmark precedents: Gurbaksh Singh Sibbia, Sushila Aggarwal, Siddharam Satlingappa, "
-            "(d) conditions that may be imposed on anticipatory bail."
-        )
-    elif "bail" in doc_lower:
-        doc_hint = (
-            "This is a bail application. "
-            "Ensure queries target: (a) Section 437/439 CrPC / Section 480/483 BNSS bail grounds, "
-            "(b) triple-test for bail (flight risk, tampering, repeat offence), "
-            "(c) parity with co-accused bail doctrine, "
-            "(d) landmark bail precedents: Arnesh Kumar, Dataram Singh, Prasanta Kumar Sarkar."
-        )
-    elif "criminal appeal" in doc_lower:
-        doc_hint = (
-            "This is a criminal appeal. "
-            "Ensure queries target: (a) perverse appreciation of evidence by trial court, "
-            "(b) Section 374/377 CrPC / Section 415 BNSS appellate jurisdiction, "
-            "(c) benefit of doubt / presumption of innocence at appellate stage, "
-            "(d) re-appreciation of witness testimony and circumstantial evidence standards."
-        )
-    elif "civil appeal" in doc_lower:
-        doc_hint = (
-            "This is a civil appeal. "
-            "Ensure queries target: (a) Section 96/100 CPC first and second appeal grounds, "
-            "(b) question of law vs fact distinction for second appeal, "
-            "(c) perversity of findings and misreading of evidence, "
-            "(d) Section 115 CPC revision jurisdiction."
-        )
-    elif "quash" in doc_lower:
-        doc_hint = (
-            "This is a writ / FIR-quashing petition. "
-            "Ensure queries target: (a) Section 41-A CrPC/BNSS non-compliance and wrongful arrest, "
-            "(b) abuse of process / civil-vs-criminal remedy doctrine, "
-            "(c) Section 482 CrPC / Section 528 BNSS inherent powers jurisprudence, "
-            "(d) Bhajan Lal categories for quashing FIR."
-        )
-    elif "writ" in doc_lower and "criminal" in doc_lower:
-        doc_hint = (
-            "This is a criminal writ petition under Article 226. "
-            "Ensure queries target: (a) Articles 21, 22 — personal liberty and due process, "
-            "(b) illegal detention / habeas corpus, "
-            "(c) Section 482 CrPC / BNSS inherent powers, "
-            f"(d) the specific criminal issue: {subject_matter}."
-        )
-    elif "pil" in doc_lower or "public interest" in doc_lower:
-        doc_hint = (
-            "This is a Public Interest Litigation (PIL). "
-            "Ensure queries target: (a) locus standi for PIL petitioners, "
-            "(b) Article 32 / 226 scope for PILs, "
-            "(c) the specific public law issue raised in facts, "
-            "(d) landmark PIL precedents: Bandhua Mukti Morcha, Hussainara Khatoon, Vishaka."
-        )
-    elif "writ" in doc_lower or "226" in doc_lower or "32" in doc_lower:
-        # Civil writ — tailor to subject matter
-        doc_hint = (
-            f"This is a civil writ petition (Article 226/32). Subject: {subject_matter}. "
-            "Ensure queries target: (a) scope of writ jurisdiction and alternative remedy doctrine, "
-            "(b) the specific relief (mandamus, certiorari, prohibition, quo warranto), "
-        )
-        # ── Pay / ACP / Salary / Arrears (service pay matters) ──────────────
-        if _kw_match(["pay", "salary", "acp", "assured career progression",
-                      "grade pay", "pay scale", "arrear", "increment",
-                      "pay fixation", "pay revision", "allowance"], sm_lower):
-            doc_hint += (
-                "(c) ACP / MACP Assured Career Progression scheme — pay upgradation on completion of service years, "
-                "(d) pay fixation rules — Fundamental Rules, CCS (RP) Rules, Pay Commission recommendations, "
-                "(e) arrears release after non-implementation of a valid pay order — continuing cause of action doctrine, "
-                "(f) mandamus to implement unrevoked government pay / promotion order, "
-                "(g) limitation — State cannot set up laches when default is its own non-implementation of an order. "
-                "Key precedents: State of Punjab v Amar Nath Goyal, Shyam Babu Verma v UOI, "
-                "Bhupinder Singh v UOI, K Nagaraj v State of AP (pay protection), "
-                "State of AP v Sagar Ahuja (continuing wrong in service pay)."
-            )
-        # ── Pension ──────────────────────────────────────────────────────────
-        elif "pension" in sm_lower or "retiral" in sm_lower or "gratuity" in sm_lower:
-            doc_hint += (
-                "(c) pension rules — CCS Pension Rules, FR/SR, UGC/State pension schemes, "
-                "(d) commutation of pension, family pension, gratuity computation, "
-                "(e) right to pension as a vested right — not a bounty, "
-                "(f) mandamus to release withheld pension arrears."
-            )
-        # ── Promotion / Seniority / DPC ──────────────────────────────────────
-        elif any(kw in sm_lower for kw in ["promotion", "seniority", "dpc", "selection grade",
-                                            "time-bound", "time bound"]):
-            doc_hint += (
-                "(c) promotion criteria — DPC procedure, zone of consideration, roster system, "
-                "(d) seniority fixation rules, merit-cum-seniority vs pure seniority, "
-                "(e) Articles 14, 16 — equality in public employment, "
-                "(f) mandamus to convene DPC or implement promotion order."
-            )
-        # ── Reinstatement / Dismissal / Termination ──────────────────────────
-        elif any(kw in sm_lower for kw in ["service", "employment", "termination", "dismissal",
-                                            "reinstatement", "back wage"]):
-            doc_hint += (
-                "(c) service law — Articles 14, 16, 311, natural justice in departmental inquiry, "
-                "(d) reinstatement, back wages, wrongful termination precedents, "
-                "(e) All India Services Rules / Central Services Rules applicable."
-            )
-        elif "property" in sm_lower or "land" in sm_lower:
-            doc_hint += (
-                "(c) property rights, Article 300-A, land acquisition compensation, "
-                "(d) mutation of revenue records, adverse possession, easement rights."
-            )
-        elif "tax" in sm_lower:
-            doc_hint += (
-                "(c) Income Tax Act / GST Act assessment and recovery, stay of demand, "
-                "(d) Section 220 IT Act, principles of natural justice in tax proceedings."
-            )
-        elif "labour" in sm_lower:
-            doc_hint += (
-                "(c) Industrial Disputes Act, workman reinstatement, Section 25-F retrenchment, "
-                "(d) unfair labour practice, award of labour court."
-            )
-        elif "cheque" in sm_lower:
-            doc_hint += (
-                "(c) Section 138/141 Negotiable Instruments Act, statutory notice requirements, "
-                "(d) Section 139 NI Act presumptions, compounding under Section 147 NI Act."
-            )
-        elif "matrimonial" in sm_lower or "divorce" in sm_lower:
-            doc_hint += (
-                "(c) Hindu Marriage Act / Special Marriage Act grounds for divorce, "
-                "(d) maintenance under Section 125 CrPC / Section 144 BNSS, custody principles."
-            )
-        elif "consumer" in sm_lower:
-            doc_hint += (
-                "(c) Consumer Protection Act, deficiency of service, unfair trade practice, "
-                "(d) NCDRC / State Commission jurisdiction and procedure."
-            )
-        else:
-            doc_hint += f"(c) constitutional and statutory basis for the relief sought in {subject_matter}."
-    elif "slp" in doc_lower or "special leave" in doc_lower:
-        # Subject-matter-aware SLP hints
-        slp_sm_hint = ""
-        if _kw_match(["pay", "salary", "acp", "service", "employment",
-                      "pension", "promotion", "seniority"], sm_lower):
-            slp_sm_hint = (
-                "Focus specifically on: service law SLP — pay fixation, ACP/MACP arrears, "
-                "non-implementation of government order, Section 14/19 Administrative Tribunals Act, "
-                "maintainability of SLP after CAT/High Court, scope of Article 136 in service matters."
-            )
-        elif any(kw in sm_lower for kw in ["cheque", "negotiable instrument", "section 138"]):
-            slp_sm_hint = (
-                "Focus on: Section 138/141 Negotiable Instruments Act cheque dishonour, "
-                "legal notice period, Section 139 presumption, compounding under Section 147 NI Act, "
-                "SLP maintainability when concurrent findings on cheque dishonour."
-            )
-        elif any(kw in sm_lower for kw in ["arbitration", "section 11", "award", "section 34"]):
-            slp_sm_hint = (
-                "Focus on: Arbitration and Conciliation Act — Section 11 appointment, "
-                "Section 34 setting aside award, Section 37 appeal, scope of court interference in arbitral awards, "
-                "unstamped agreement — admissibility (NN Global, In Re: Interplay)."
-            )
-        elif any(kw in sm_lower for kw in ["land", "property", "acquisition", "revenue"]):
-            slp_sm_hint = (
-                "Focus on: land acquisition compensation, Section 24 Land Acquisition Act 2013 lapse, "
-                "adverse possession, Article 300-A right to property, mutation of revenue records."
-            )
-        elif any(kw in sm_lower for kw in ["tax", "income tax", "gst", "custom"]):
-            slp_sm_hint = (
-                "Focus on: Income Tax Act / GST Act assessment, reassessment, penalty provisions, "
-                "substantial question of law for SLP in tax matters, revenue vs capital expenditure, "
-                "Section 263/271 IT Act, refund and interest."
-            )
-        else:
-            slp_sm_hint = f"Underlying subject: {subject_matter}."
-
-        doc_hint = (
-            "This is a Special Leave Petition under Article 136 of the Constitution. "
-            f"{slp_sm_hint} "
-            "Ensure queries target: (a) Article 136 scope — exceptional circumstances for interference, "
-            "(b) interference with concurrent findings of fact by the Supreme Court — perversity standard, "
-            "(c) substantial question of law required for SLP admission, "
-            "(d) the specific legal error in the impugned High Court judgment."
-        )
-    elif "insolvency" in doc_lower or "ibc" in doc_lower or "nclt" in doc_lower or "winding" in doc_lower or "company petition" in doc_lower:
-        doc_hint = (
-            "This is an insolvency / IBC / company petition. "
-            "Ensure queries target: (a) Section 7/9/10 IBC financial/operational creditor claims — default and initiation, "
-            "(b) CIRP initiation thresholds (Rs 1 crore), timelines and NCLT jurisdiction, "
-            "(c) moratorium under Section 14 IBC — effect on pending suits, "
-            "(d) Section 31 IBC resolution plan approval and Section 33 liquidation, "
-            "(e) NCLAT appellate jurisdiction under Section 61 IBC, "
-            "(f) pre-pack insolvency (PIRP), cross-border insolvency under Part Z IBC."
-        )
-    # ── Contempt Petition ─────────────────────────────────────────────────────
-    elif "contempt" in doc_lower:
-        doc_hint = (
-            "This is a Contempt of Court petition. "
-            "Ensure queries target: (a) Contempt of Courts Act 1971 — civil contempt (wilful disobedience) vs criminal contempt, "
-            "(b) Section 2(b)/2(c) CoC Act — definition and elements of contempt, "
-            "(c) Article 129 (SC) / Article 215 (HC) — inherent power to punish contempt, "
-            "(d) wilful disobedience of court order — deliberate and intentional act, "
-            "(e) landmark contempt precedents: Re: Vinay Chandra Mishra, Prashant Bhushan contempt, "
-            "Baradakanta Mishra v Bhimsen Dixit."
-        )
-    # ── Transfer Petition ─────────────────────────────────────────────────────
-    elif "transfer" in doc_lower and "petition" in doc_lower:
-        doc_hint = (
-            "This is a Transfer Petition. "
-            "Ensure queries target: (a) Section 25 CPC / Section 406 CrPC — grounds for transfer, "
-            "(b) fair trial, apprehension of bias, convenience of parties as transfer grounds, "
-            "(c) matrimonial transfer petitions — Section 25 CPC, wife's convenience principle, "
-            "(d) Article 139-A Supreme Court transfer jurisdiction, "
-            "(e) landmark transfer precedents: Surinder Kaur v Harbax Singh, Anita Kushwaha v Pushap Sudan."
-        )
-    # ── Review Petition ───────────────────────────────────────────────────────
-    elif "review" in doc_lower and "petition" in doc_lower:
-        doc_hint = (
-            "This is a Review Petition. "
-            "Ensure queries target: (a) Order 47 Rule 1 CPC / Section 114 CPC — grounds for review, "
-            "(b) error apparent on the face of the record — narrow scope, "
-            "(c) new evidence discovered after judgment, "
-            "(d) review jurisdiction of Supreme Court under Article 137 / High Court under Article 226, "
-            "(e) precedents: Northern India Caterers v Lt. Governor Delhi, Haridas Das v Usha Rani Banik."
-        )
-    # ── Curative Petition ─────────────────────────────────────────────────────
-    elif "curative" in doc_lower:
-        doc_hint = (
-            "This is a Curative Petition. "
-            "Ensure queries target: (a) Rupa Hurra v Ashok Hurra — curative petition origin and grounds, "
-            "(b) violation of principles of natural justice — not heard before judgment, "
-            "(c) forum shopping / bias by judge, "
-            "(d) curative petition as last constitutional remedy after review dismissed, "
-            "(e) maintainability — certification by senior counsel, circulation before 3-judge bench."
-        )
-    # ── Civil Revision / Second Appeal ────────────────────────────────────────
-    elif "civil revision" in doc_lower or "second appeal" in doc_lower or "lpa" in doc_lower or "letters patent" in doc_lower:
-        doc_hint = (
-            "This is a Civil Revision / Second Appeal / Letters Patent Appeal. "
-            "Ensure queries target: (a) Section 115 CPC — revision jurisdiction — jurisdictional error, "
-            "(b) Section 100 CPC — second appeal — substantial question of law, "
-            "(c) Letters Patent Appeal — clause 10/15 — intra-court appeal against single judge, "
-            "(d) non-interference with concurrent findings of fact, perversity standard, "
-            "(e) substantial question of law — formulation at admission stage — Panchugopal Barua v Umesh Chandra Goswami."
-        )
-    # ── Original Suit (Article 131) ───────────────────────────────────────────
-    elif "131" in doc_lower or "original suit" in doc_lower or "inter-state" in doc_lower:
-        doc_hint = (
-            "This is an Original Suit / inter-State dispute under Article 131. "
-            "Ensure queries target: (a) Article 131 — exclusive original jurisdiction of SC in Centre-State or State-State disputes, "
-            "(b) legal right vs political question — justiciability, "
-            "(c) water disputes (Article 262 / Inter-State River Water Disputes Act), "
-            "(d) territorial boundary disputes, "
-            "(e) precedents: State of Karnataka v State of Tamil Nadu, State of Rajasthan v UOI."
-        )
-    # ── CAT / Service Matter Original Application ─────────────────────────────
-    # NOTE: word-boundary match — a bare substring 'cat' hijacked every doc type
-    # containing 'application' (appliCATion) into tribunal queries.
-    elif re.search(r"\bcat\b", doc_lower) or "administrative tribunal" in doc_lower or "original application" in doc_lower or ("service" in doc_lower and "tribunal" in doc_lower):
-        doc_hint = (
-            "This is a Service Matter Original Application before CAT / Administrative Tribunal. "
-            f"Subject: {subject_matter}. "
-            "Ensure queries target: (a) Administrative Tribunals Act 1985 — jurisdiction, procedure, Section 14/15/19, "
-            "(b) the specific service law violation: pay fixation, ACP/MACP, promotion, seniority, disciplinary proceedings, "
-            "(c) Articles 14, 16 — equality in public employment, "
-            "(d) limitation under Section 21 AT Act — continuing wrong doctrine for pay/allowance matters, "
-            "(e) mandamus to implement government order — laches cannot be pleaded by the defaulting authority."
-        )
-    # ── Motor Accident Claim Petition (MACT) ─────────────────────────────────
-    elif "motor accident" in doc_lower or "mact" in doc_lower or "motor vehicles" in doc_lower:
-        doc_hint = (
-            "This is a Motor Accident Claim Petition before MACT. "
-            "Ensure queries target: (a) Sections 140/163-A/166 Motor Vehicles Act — fault vs no-fault liability, "
-            "(b) structured formula (Second Schedule) vs Sarla Verma formula for compensation, "
-            "(c) multiplier method — loss of dependency, future prospects, non-pecuniary heads, "
-            "(d) insurer's liability — policy conditions, gratuitous passenger exclusion, "
-            "(e) precedents: National Insurance Co v Pranay Sethi, Sarla Verma v Delhi Transport Corp, "
-            "Rani Devi v Rajasthan State RTC."
-        )
-    # ── RERA / Real Estate ────────────────────────────────────────────────────
-    elif "rera" in doc_lower or "real estate" in doc_lower or "builder" in doc_lower or "developer" in doc_lower:
-        doc_hint = (
-            "This is a RERA / real estate complaint. "
-            "Ensure queries target: (a) RERA Act 2016 — Section 18 (failure to hand over possession), "
-            "Section 12 (false representation), Section 31 (complaint to authority), "
-            "(b) RERA Appellate Tribunal jurisdiction — Section 43 RERA, "
-            "(c) refund with interest (10.15%) — delay in possession, "
-            "(d) consumer forum vs RERA — concurrent jurisdiction, "
-            "(e) precedents: IREO Grace Realtech v Abhishek Khanna, Pioneer Urban Land v Govindan Raghavan."
-        )
-    # ── DRT / SARFAESI / Debt Recovery ───────────────────────────────────────
-    elif "drt" in doc_lower or "sarfaesi" in doc_lower or "debt recovery" in doc_lower or "rdba" in doc_lower:
-        doc_hint = (
-            "This is a Debt Recovery / SARFAESI application. "
-            "Ensure queries target: (a) SARFAESI Act 2002 — Section 13(2) notice, Section 13(4) possession, "
-            "Section 17 application to DRT, Section 18 appeal to DRAT, "
-            "(b) Recovery of Debts and Bankruptcy Act 1993 — DRT jurisdiction, certificate of recovery, "
-            "(c) Section 13(3A) SARFAESI — objection procedure and bank response obligation, "
-            "(d) wrongful possession / auction — procedural defects, "
-            "(e) precedents: United Bank of India v Satyawati Tondon, Mardia Chemicals v UOI."
-        )
-    # ── NGT / Environmental ───────────────────────────────────────────────────
-    elif "ngt" in doc_lower or "environment" in doc_lower or "environmental" in doc_lower or "green tribunal" in doc_lower:
-        doc_hint = (
-            "This is an NGT / environmental matter. "
-            "Ensure queries target: (a) NGT Act 2010 — Section 14/15/16 jurisdiction and compensation, "
-            "(b) Environment Protection Act 1986 / Water Act 1974 / Air Act 1981 — violation, "
-            "(c) precautionary principle, polluter pays principle, sustainable development, "
-            "(d) Environmental Impact Assessment (EIA) notification compliance, "
-            "(e) precedents: Sterlite Industries v UOI, Vellore Citizens Welfare Forum v UOI, "
-            "MC Mehta v UOI (Taj Trapezium)."
-        )
-    # ── ITAT / Income Tax Appeal ──────────────────────────────────────────────
-    elif "itat" in doc_lower or "tax appeal" in doc_lower or "income tax" in doc_lower or "gst appeal" in doc_lower:
-        doc_hint = (
-            "This is a Tax Appeal before ITAT / Appellate Authority. "
-            "Ensure queries target: (a) Income Tax Act 1961 — Section 143(3) assessment, Section 147/148 reassessment, "
-            "Section 263 revision by CIT, Section 271 penalty, "
-            "(b) GST Act — Section 73/74 demand, Section 83 provisional attachment, "
-            "(c) revenue vs capital expenditure — Section 37 IT Act, "
-            "(d) transfer pricing — Section 92 IT Act, arm's length price, "
-            "(e) refund with interest — Section 244-A IT Act."
-        )
-    # ── Commercial Suit ───────────────────────────────────────────────────────
-    elif "commercial" in doc_lower and ("suit" in doc_lower or "court" in doc_lower):
-        doc_hint = (
-            "This is a Commercial Suit under the Commercial Courts Act 2015. "
-            "Ensure queries target: (a) Commercial Courts Act 2015 — specified value threshold (Rs 3 lakh+), jurisdiction, "
-            "(b) mandatory pre-institution mediation — Section 12-A Commercial Courts Act, "
-            "(c) Order XIII-A CPC — summary judgment in commercial disputes, "
-            "(d) Section 36 Arbitration Act — enforcement of arbitral award as commercial matter, "
-            "(e) expedited trial, discovery and document production under Commercial Courts regime."
-        )
-    # ── Industrial Dispute / Labour Court ────────────────────────────────────
-    elif "industrial dispute" in doc_lower or "labour court" in doc_lower or "reinstatement application" in doc_lower:
-        doc_hint = (
-            "This is an Industrial Dispute / Labour Court matter. "
-            "Ensure queries target: (a) Industrial Disputes Act 1947 — Section 25-F retrenchment compensation, "
-            "Section 2(s) workman definition, Section 10 reference to tribunal, "
-            "(b) reinstatement with back wages — unfair labour practice, "
-            "(c) Section 33 ID Act — change in conditions of service during pendency, "
-            "(d) jurisdiction — Industrial Tribunal vs Civil Court, "
-            "(e) precedents: Workmen of Firestone Tyre v Firestone Tyre Co, "
-            "Deepali Gundu Surwase v Kranti Junior Adhyapak Mahavidyalaya."
-        )
-    # ── Divorce / Custody / Maintenance Petition ──────────────────────────────
-    elif any(kw in doc_lower for kw in ["divorce", "custody", "maintenance petition", "maintenance application", "domestic violence", "matrimonial"]):
-        doc_hint = (
-            "This is a matrimonial / family law petition. "
-            "Ensure queries target: (a) Hindu Marriage Act 1955 / Special Marriage Act 1954 — grounds for divorce (cruelty, desertion, adultery), "
-            "(b) Section 125 CrPC / Section 144 BNSS — maintenance to wife and children, "
-            "(c) Guardian and Wards Act 1890 / Hindu Minority and Guardianship Act 1956 — child custody, welfare principle, "
-            "(d) Protection of Women from Domestic Violence Act 2005 — protection orders, residence orders, "
-            "(e) irretrievable breakdown of marriage — Article 142 SC power, "
-            "(f) precedents: Shilpa Sailesh v Varun Sreenivasan (irretrievable breakdown), Gita Hariharan v RBI."
-        )
-    # ── Cheque Bounce Complaint ───────────────────────────────────────────────
-    elif "cheque" in doc_lower or "negotiable instrument" in doc_lower or "138" in doc_lower:
-        doc_hint = (
-            "This is a Cheque Dishonour complaint under Section 138 Negotiable Instruments Act. "
-            "Ensure queries target: (a) Section 138 NI Act — essential ingredients: cheque, debt, dishonour, legal notice within 30 days, "
-            "(b) Section 141 NI Act — liability of directors / company officers, "
-            "(c) Section 139 NI Act — presumption of debt, rebuttal, "
-            "(d) Section 147 NI Act — compounding, "
-            "(e) Court Metropolitan Magistrate jurisdiction, territorial jurisdiction — where cheque presented, "
-            "(f) precedents: Kusum Ingots v UOI, Dashrath Rupsingh Rathod v State of Maharashtra (territorial jurisdiction)."
-        )
-    # ── Money Recovery Civil Suit ─────────────────────────────────────────────
-    elif "money recovery" in doc_lower or "civil suit" in doc_lower or "execution petition" in doc_lower:
-        doc_hint = (
-            "This is a Civil Suit for money recovery / specific performance / partition / injunction. "
-            "Ensure queries target: (a) Specific Relief Act 1963 — Section 10 specific performance, "
-            "Section 38/39 permanent injunction, Section 6 suit for possession, "
-            "(b) CPC Order VII Rule 11 — rejection of plaint, "
-            "(c) CPC Order 39 Rules 1 & 2 — temporary injunction — prima facie case, balance of convenience, irreparable harm, "
-            "(d) Section 9 CPC — civil courts jurisdiction, "
-            "(e) Limitation Act 1963 — Article 54 specific performance (3 years), "
-            "(f) precedents: Gujarat Bottling Co v Coca Cola Co (injunction), Adani Gas Ltd v UOI."
-        )
-    # ── Consumer Complaint ────────────────────────────────────────────────────
-    elif "consumer complaint" in doc_lower or "consumer protection" in doc_lower or "ncdrc" in doc_lower:
-        doc_hint = (
-            "This is a Consumer Complaint under the Consumer Protection Act 2019. "
-            "Ensure queries target: (a) CPA 2019 — Section 2(7) consumer definition, Section 2(16) defect, "
-            "Section 2(42) unfair trade practice, Section 2(11) deficiency in service, "
-            "(b) pecuniary jurisdiction — District / State / National Commission (up to 1 Cr / 10 Cr / above), "
-            "(c) CPA 2019 Section 35/47/58 complaint procedure, "
-            "(d) service provider liability — builder, insurance company, hospital, "
-            "(e) precedents: Spring Meadows Hospital v Harjol Ahluwalia, IREO Grace Realtech v Abhishek Khanna."
-        )
-
-
-    # Fallback for unmatched types — use subject matter directly
+    # Doc-type hint resolved from doc_type_retrieval_hints (DB-driven).
+    # Rows are checked in priority order; a row matches when all keywords_all
+    # AND any keywords_any appear as whole words in the doc-type haystack, and
+    # any subject_keywords_any (if set) appear in the subject matter. This
+    # replaces the old hardcoded elif chain whose bare substring checks caused
+    # the appliCATion/disCHARGE routing hijacks.
+    doc_hint = _resolve_doc_hint(cfg["hints"], doc_lower, sm_lower)
     if not doc_hint:
-        doc_hint = (
-            f"Document Type: {doc_type}. Subject Matter: {subject_matter}. "
+        doc_hint = cfg["config"].get("generic_doc_hint") or (
+            "Document Type: {doc_type}. Subject Matter: {subject_matter}. "
             "Ensure queries are tightly focused on the specific legal issues in the subject matter. "
             "Avoid broad generic constitutional queries unless fundamental rights are directly violated."
         )
+    doc_hint = (doc_hint
+                .replace("{subject_matter}", subject_matter or "")
+                .replace("{doc_type}", doc_type or ""))
 
-    # Prepend user-provided search_hint if given
     hint_line = f"\nUser search refinement (incorporate this): {search_hint}" if search_hint else ""
 
     n = NUM_QUERIES
@@ -782,16 +432,22 @@ async def retrieve_judgment_chunks(
        Winner chunks are expanded with ±1 neighbouring chunks for richer LLM context.
        Holding prefix omitted when the chunk itself IS the holding paragraph.
     """
-    # Derive case_type filter for citation context
-    case_type_filter = _derive_case_type_filter(document_type_key, subject_matter) if document_type_key else []
+    # Derive case_type filter for citation context (config is DB-driven)
+    cfg = await _get_runtime_config(engine)
+    case_type_filter = _derive_case_type_filter(cfg["config"], document_type_key, subject_matter) if document_type_key else []
     sem_weight = 1.5 if context == "citations" else 1.0
     kw_weight  = 1.5 if context == "citations" else 2.0
 
     # ── Case-type filter clause (constant across queries) ────────────────
     ct_filter_sql = ""
     params_shared: dict = {}
-    if case_type_filter and context == "citations":
-        ct_filter_sql = " AND (j.case_type = ANY(:case_types) OR j.case_type IS NULL)"
+    if case_type_filter and context == "citations" and CASE_TYPE_FILTER_ENABLED:
+        # NULLIF: case_type is an EMPTY STRING (not NULL) on 10,577 of 39,506
+        # judgments — 27% of the corpus. `IS NULL` alone therefore excluded all
+        # of them from every filtered search, including Gurbaksh Singh Sibbia,
+        # the leading anticipatory-bail authority. Unlabelled rows must be
+        # treated as "unknown case type" and kept, exactly like NULL.
+        ct_filter_sql = " AND (j.case_type = ANY(:case_types) OR NULLIF(j.case_type, '') IS NULL)"
         params_shared["case_types"] = case_type_filter
 
     async def _run_query(query: str):
@@ -880,8 +536,11 @@ async def retrieve_judgment_chunks(
             # Only fires for case-name-style queries, where strict AND search
             # usually finds nothing but the distinctive party names make the
             # OR query cheap. ts_rank (not ts_rank_cd) keeps ranking cheap.
+            # Only PARTY NAMES are ORed: ORing every word of a long multi-case
+            # query matched 98.7% of the corpus and cost ~47s per query.
             if JUDGMENT_OR_FALLBACK and len(kw_rows) < 5 and _looks_like_case_name(query):
-                words = [w for w in re.split(r'\W+', query) if len(w) > 2]
+                stopwords = set(cfg["config"].get("case_name_stopwords") or [])
+                words = _case_name_terms(query, stopwords)
                 if len(words) > 1:
                     or_query = " | ".join(words)
                     fallback_sql = f"""
@@ -897,7 +556,12 @@ async def retrieve_judgment_chunks(
                         LIMIT  20
                     """
                     try:
-                        kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **params_shared})
+                        # Timeout-capped: the fallback is a nice-to-have rescue,
+                        # never a reason to blow the request's latency budget.
+                        kw_rows = await _exec_raw(
+                            engine, fallback_sql, {"or_q": or_query, **params_shared},
+                            presql=f"SET LOCAL statement_timeout = {OR_FALLBACK_TIMEOUT_MS}",
+                        )
                     except Exception as fallback_err:
                         print(f"[retrieve_judgment_chunks] OR Fallback SQL error: {fallback_err}")
 
@@ -1082,58 +746,9 @@ async def retrieve_judgment_chunks(
 # "Section 45 of the Prevention of Money Laundering Act", "Article 21"),
 # that section is looked up directly and boosted above fuzzy matches —
 # fuzzy hybrid search alone often ranks a neighbouring section higher.
-_ACT_NAME_TO_SHORT_CODE = [
-    # Longest / most specific names first so they win the substring scan
-    ("bharatiya nagarik suraksha sanhita", "BNSS"),
-    ("bharatiya nyaya sanhita", "BNS"),
-    ("bharatiya sakshya adhiniyam", "BSA"),
-    ("code of criminal procedure", "CrPC"),
-    ("criminal procedure code", "CrPC"),
-    ("code of civil procedure", "CPC"),
-    ("civil procedure code", "CPC"),
-    ("indian penal code", "IPC"),
-    ("indian evidence act", "IEA"),
-    ("evidence act", "IEA"),
-    ("constitution of india", "COI"),
-    ("indian contract act", "CONTRACT"),
-    ("contract act", "CONTRACT"),
-    ("sale of goods act", "SALE"),
-    ("partnership act", "PARTNERSHIP"),
-    ("companies act", "COMPANIES"),
-    ("insolvency and bankruptcy code", "IBC"),
-    ("negotiable instruments act", "NI"),
-    ("transfer of property act", "TPA"),
-    ("registration act", "REGISTRATION"),
-    ("easements act", "EASEMENTS"),
-    ("specific relief act", "SRA"),
-    ("hindu marriage act", "HMA"),
-    ("hindu succession act", "HSA"),
-    ("arbitration and conciliation act", "ARBITRATION"),
-    ("arbitration act", "ARBITRATION"),
-    ("sarfaesi", "SARFAESI"),
-    ("recovery of debts", "RDB"),
-    ("consumer protection act", "CPA"),
-    ("income-tax act", "ITAX"),
-    ("income tax act", "ITAX"),
-    ("central goods and services tax", "CGST"),
-    ("integrated goods and services tax", "IGST"),
-    ("prevention of corruption act", "PC"),
-    ("prevention of money laundering act", "PMLA"),
-    ("juvenile justice", "JJ"),
-    ("protection of children from sexual offences", "POCSO"),
-    ("domestic violence act", "DV"),
-    ("sexual harassment of women at workplace", "POSH"),
-    ("information technology act", "IT"),
-    ("right to information act", "RTI"),
-    ("land acquisition", "LARR"),
-    ("industrial relations code", "IR"),
-    ("code on wages", "WAGES"),
-    # Bare abbreviations last (matched as whole words below)
-    ("bnss", "BNSS"), ("bns", "BNS"), ("bsa", "BSA"), ("crpc", "CrPC"),
-    ("ipc", "IPC"), ("cpc", "CPC"), ("iea", "IEA"), ("ibc", "IBC"),
-    ("pmla", "PMLA"), ("pocso", "POCSO"), ("sra", "SRA"), ("hma", "HMA"),
-    ("cgst", "CGST"), ("ni act", "NI"), ("coi", "COI"),
-]
+# Act-name → short_code aliases come from legal_codes.aliases (DB-driven,
+# longest-first — see _get_runtime_config), replacing a hardcoded copy of
+# the legal_codes table that drifted whenever an act was added.
 
 _SECTION_REF_RE = re.compile(
     r"[Ss]ections?\s+(\d+[A-Za-z]{0,2})(?:\s*\([0-9A-Za-z]+\))?"   # 438, 41A, 13(2)
@@ -1143,13 +758,13 @@ _SECTION_REF_RE = re.compile(
 _ARTICLE_REF_RE = re.compile(r"[Aa]rticles?\s+(\d+[A-Za-z]?(?:-[A-Za-z])?)")
 
 
-def _extract_section_refs(queries: list) -> set:
+def _extract_section_refs(queries: list, act_aliases: list) -> set:
     """Return {(section_number, short_code)} explicitly referenced in queries."""
     refs = set()
     for q in queries:
         for m in _SECTION_REF_RE.finditer(q):
             sec, tail = m.group(1), (m.group(2) or "").lower()
-            for name, code in _ACT_NAME_TO_SHORT_CODE:
+            for name, code in act_aliases:
                 # Whole-word check so 'ipc' doesn't match inside another word
                 if re.search(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", tail):
                     refs.add((sec, code))
@@ -1160,29 +775,33 @@ def _extract_section_refs(queries: list) -> set:
 
 
 async def _lookup_exact_sections(engine, refs: set, coi_only: bool) -> list:
-    """Direct lookups for explicitly-referenced sections; bypasses domain filter."""
+    """Direct lookups for explicitly-referenced sections; bypasses domain filter.
+
+    All references resolve in ONE query — this previously issued a separate
+    round trip (and pool checkout) per reference, serialising up to 12 Neon
+    round trips into the critical path of every request.
+    """
     if coi_only:
         refs = {(s, c) for s, c in refs if c == "COI"}
     if not refs:
         return []
-    rows = []
-    for sec, code in list(refs)[:12]:
-        try:
-            hit = await _exec_raw(
-                engine,
-                """
-                    SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code
-                    FROM   legal_code_sections lcs
-                    JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
-                    WHERE  lc.short_code = :code AND lcs.section_number = :sec
-                    LIMIT  1
-                """,
-                {"code": code, "sec": sec},
-            )
-            rows.extend(hit)
-        except Exception as e:
-            print(f"[retrieve_statutes] Exact lookup failed for {sec} {code}: {e}")
-    return rows
+    pairs = list(refs)[:12]
+    try:
+        return await _exec_raw(
+            engine,
+            """
+                SELECT lcs.id, lcs.section_number, lcs.title, lcs.section_text, lc.short_code
+                FROM   legal_code_sections lcs
+                JOIN   legal_codes lc ON lc.id = lcs.legal_code_id
+                JOIN   unnest(cast(:secs as varchar[]), cast(:codes as varchar[]))
+                         AS want(sec, code)
+                  ON   want.code = lc.short_code AND want.sec = lcs.section_number
+            """,
+            {"secs": [s for s, _ in pairs], "codes": [c for _, c in pairs]},
+        )
+    except Exception as e:
+        print(f"[retrieve_statutes] Exact lookup failed for {pairs}: {e}")
+        return []
 
 
 async def retrieve_statutes(
@@ -1198,19 +817,22 @@ async def retrieve_statutes(
     """
     Hybrid search over legal_code_sections.
     When document_type_key is provided and context='citations', filters to relevant statute codes.
-    coi_only filters to Constitution of India (legal_code_id=7) — takes precedence over code filter.
+    coi_only filters to the Constitution of India — takes precedence over the code filter.
     """
     sem_weight = 1.5 if context == "citations" else 1.0
     kw_weight  = 1.5 if context == "citations" else 2.0
+
+    cfg = await _get_runtime_config(engine)
 
     # Build domain filter
     code_filter_sql = ""
     code_params: dict = {}
     if coi_only:
-        code_filter_sql = " AND lcs.legal_code_id = 7"
+        # By short_code, not a hardcoded legal_code_id (ids differ per environment)
+        code_filter_sql = " AND lc.short_code = 'COI'"
     elif document_type_key and context == "citations":
         # Pass subject_matter so constitutional domain is included when relevant
-        relevant_domains = _derive_statute_domains(document_type_key, subject_matter)
+        relevant_domains = _derive_statute_domains(cfg["config"], document_type_key, subject_matter)
         if relevant_domains:
             # PostgreSQL array overlap operator &&
             code_filter_sql = " AND lc.domains && cast(:allowed_domains as varchar[])"
@@ -1273,7 +895,10 @@ async def retrieve_statutes(
                         LIMIT  30
                     """
                     try:
-                        kw_rows = await _exec_raw(engine, fallback_sql, {"or_q": or_query, **code_params})
+                        kw_rows = await _exec_raw(
+                            engine, fallback_sql, {"or_q": or_query, **code_params},
+                            presql=f"SET LOCAL statement_timeout = {OR_FALLBACK_TIMEOUT_MS}",
+                        )
                     except Exception as fallback_err:
                         print(f"[retrieve_statutes] OR Fallback SQL error: {fallback_err}")
         except Exception as sql_err:
@@ -1284,7 +909,7 @@ async def retrieve_statutes(
         return vec_rows, kw_rows
 
     # All queries in parallel + exact section-reference lookups alongside
-    exact_task = _lookup_exact_sections(engine, _extract_section_refs(queries), coi_only)
+    exact_task = _lookup_exact_sections(engine, _extract_section_refs(queries, cfg["aliases"]), coi_only)
     gathered = await asyncio.gather(
         *(_run_query(q) for q in queries), exact_task, return_exceptions=True
     )
@@ -1462,13 +1087,29 @@ async def retrieve_court_rules(
     if not rules_by_chapter:
         return ""
 
+    # Banner from the court identity row — this function serves every court,
+    # not just the one it was first built for.
+    banner = "COURT RULES"
+    try:
+        ident = await _exec_raw(
+            engine,
+            "SELECT court_name, rule_book_title FROM court_identities WHERE id = :cid",
+            {"cid": court_identity_id},
+        )
+        if ident:
+            court_name = (ident[0].court_name or "").upper()
+            rule_book = ident[0].rule_book_title or "Rules of the Court"
+            banner = f"{court_name} — {rule_book}".strip(" —")
+    except Exception as e:
+        print(f"[court_rules] identity lookup failed (generic banner used): {e}")
+
     # Build the formatted block, grouped by chapter
     sections = []
     for ch in sorted(rules_by_chapter.keys()):
         sections.append("\n".join(rules_by_chapter[ch]))
 
     return (
-        "=== ALLAHABAD HIGH COURT — RULES OF THE COURT, 1952 (MANDATORY COMPLIANCE) ===\n"
+        f"=== {banner} (MANDATORY COMPLIANCE) ===\n"
         + "\n\n".join(sections)
         + "\n=== END COURT RULES ==="
     )
@@ -1553,38 +1194,158 @@ async def rerank_candidates(
         return candidates[:top_k]
 
 
+# Cross-encoder drop-off, in logits, and the number of results that survive it
+# regardless. A flat 2.0 drop-off routinely cut a ranked list of 25 down to a
+# single suggestion, so Step 6 offered the user one precedent to choose from.
+RERANK_DROPOFF = float(os.getenv("RAG_RERANK_DROPOFF", "4.0"))
+RERANK_MIN_RESULTS = int(os.getenv("RAG_RERANK_MIN_RESULTS", "5"))
+
+
 def _filter_reranked(reranked: list) -> list:
-    """Drop-off filter + duplicate-case removal for cross-encoder-scored lists."""
+    """Drop-off filter + duplicate-case removal for cross-encoder-scored lists.
+
+    Deduplication always applies; the score drop-off only starts pruning once
+    RERANK_MIN_RESULTS distinct candidates have been kept, so a confident top
+    hit can no longer suppress the rest of the list.
+    """
     filtered = []
     seen_keys = set()
     if reranked:
         max_score = reranked[0].get("rerank_score", 0.0)
         for c in reranked:
-            s = c.get("rerank_score", 0.0)
-            # Cross encoder scores are usually logits (e.g. -10 to +10).
-            # Removed absolute cutoff because logits can be negative even for the best match.
-            # Explicitly-cited sections (exact_match) always survive the filter.
-            if s < max_score - 2.0 and not c.get("exact_match"):
-                continue
             # Drop duplicate cases (same title + year under different ids)
             key = ((c.get("title") or "").strip().lower(), c.get("year"))
             if key[0] and key in seen_keys:
                 continue
+            s = c.get("rerank_score", 0.0)
+            # Cross-encoder scores are logits (roughly -10..+10), so there is no
+            # meaningful absolute cutoff — only distance from the best match.
+            # Explicitly-cited sections (exact_match) always survive.
+            if (len(filtered) >= RERANK_MIN_RESULTS
+                    and s < max_score - RERANK_DROPOFF
+                    and not c.get("exact_match")):
+                continue
             seen_keys.add(key)
             filtered.append(c)
-    return filtered
+    return _exact_matches_first(filtered)
 
 
-async def rerank_multi(combined_query: str, groups: dict, top_ks: dict) -> dict:
+def _exact_matches_first(items: list) -> list:
+    """Float explicitly-referenced provisions to the top, order otherwise kept.
+
+    When a query names a provision ("Section 438 CrPC"), that section is the
+    answer. The cross-encoder — a general web-relevance model — routinely
+    scored a fuzzy neighbour above it and pushed the named section out of the
+    visible window entirely.
     """
-    Cross-encoder rerank of several candidate lists in ONE predict() call.
+    if not any(c.get("exact_match") for c in items):
+        return items
+    return ([c for c in items if c.get("exact_match")]
+            + [c for c in items if not c.get("exact_match")])
 
-    Halves model-call overhead vs calling rerank_candidates per list — scores
-    are identical because the cross-encoder scores each pair independently.
+
+# ── LLM listwise rerank (default reranker) ─────────────────────────────────
+# One gpt-4o-mini JSON call scores every candidate against the RAW case facts
+# (the cross-encoder is stuck with a truncated 3-query proxy and a 2020-era
+# web-search relevance notion). Benchmarked 2026-07-29 over 25 scenarios: beat
+# the cross-encoder on every accuracy measure — statute gold R@8 46.9% vs
+# 43.8%, landmark-case hit 24% vs 16%, P@5 judgments 39.2% vs 28.0%.
+# It is also SLOWER: that run averaged 33.7s against the cross-encoder's 21.5s,
+# which is why RERANK_CANDIDATES/RERANK_SNIPPET_CHARS below trim the prompt.
+# Set RAG_LLM_RERANK=0 to fall back to the cross-encoder.
+LLM_RERANK = os.getenv("RAG_LLM_RERANK", "1") == "1"
+RERANK_LLM_MODEL = os.getenv("RAG_RERANK_LLM_MODEL", "openai/gpt-4o-mini")
+# Prompt size drives rerank latency directly: 25+25 candidates at 350 chars is
+# ~18k characters per call. Trimming both is the cheapest way to buy back the
+# latency the LLM reranker costs over the cross-encoder.
+RERANK_CANDIDATES = int(os.getenv("RAG_RERANK_CANDIDATES", "15"))
+RERANK_SNIPPET_CHARS = int(os.getenv("RAG_RERANK_SNIPPET_CHARS", "250"))
+
+
+async def llm_rerank_multi(facts: str, groups: dict, top_ks: dict) -> dict:
+    """Listwise LLM rerank of several candidate lists in one call.
+
+    groups: {name: candidates}; returns {name: reranked+filtered list}.
+    Raises on failure — callers fall back to the cross-encoder.
+    """
+    if not any(groups.values()):
+        return {name: [] for name in groups}
+
+    listing = ""
+    for name, cands in groups.items():
+        listing += f"\n## {name.upper()}\n"
+        for i, c in enumerate(cands):
+            snippet = (c.get("chunk_text") or c.get("text") or "")[:RERANK_SNIPPET_CHARS]
+            listing += f"[{name}-{i}] {c.get('title', '')}\n{snippet}\n\n"
+
+    client = get_openrouter_client()
+    resp = await client.chat.completions.create(
+        model=RERANK_LLM_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert Indian Supreme Court research clerk. Score how useful each "
+                    "retrieved item is for drafting the document described by the case facts: "
+                    "10 = directly applicable provision or squarely on-point precedent, "
+                    "5 = related but generic, 0 = irrelevant. Judge statutes by whether the exact "
+                    "provision governs these facts; judge precedents by whether their holding "
+                    "supports the relief sought. Output ONLY JSON: "
+                    '{"scores": {"<item-id>": <0-10>, ...}} with one entry per item id.'
+                ),
+            },
+            {"role": "user", "content": f"CASE FACTS:\n{facts[:1800]}\n\nITEMS:{listing}"},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=2000,
+    )
+    scores = json.loads(resp.choices[0].message.content).get("scores", {})
+
+    out = {}
+    for name, cands in groups.items():
+        for i, c in enumerate(cands):
+            try:
+                c["rerank_score"] = float(scores.get(f"{name}-{i}", 0))
+            except (TypeError, ValueError):
+                c["rerank_score"] = 0.0
+        ranked = sorted(cands, key=lambda x: x.get("rerank_score", 0), reverse=True)
+        # Same shape as _filter_reranked, on the 0-10 scale: dedupe always,
+        # drop-off only once the minimum number of results is already kept.
+        filtered, seen = [], set()
+        max_s = ranked[0].get("rerank_score", 0.0) if ranked else 0.0
+        for c in ranked:
+            key = ((c.get("title") or "").strip().lower(), c.get("year"))
+            if key[0] and key in seen:
+                continue
+            s = c.get("rerank_score", 0.0)
+            if (len(filtered) >= RERANK_MIN_RESULTS
+                    and not c.get("exact_match")
+                    and (s < 3.0 or s < max_s - 4.0)):
+                continue
+            seen.add(key)
+            filtered.append(c)
+        out[name] = _exact_matches_first(filtered)[: top_ks.get(name, 10)]
+    return out
+
+
+async def rerank_multi(combined_query: str, groups: dict, top_ks: dict, facts: str = "") -> dict:
+    """
+    Rerank several candidate lists in ONE model call.
+
+    Dispatches to the LLM listwise reranker when RAG_LLM_RERANK is enabled
+    (using the raw facts, which carry far more signal than the query proxy),
+    otherwise scores with the local cross-encoder. Falls back gracefully:
+    LLM failure → cross-encoder → input order.
 
     groups:  {name: candidates}, top_ks: {name: top_k}
     Returns {name: reranked+filtered list}; falls back to input order on error.
     """
+    if LLM_RERANK:
+        try:
+            return await llm_rerank_multi(facts or combined_query, groups, top_ks)
+        except Exception as e:
+            print(f"[reranker] LLM rerank error: {e} — falling back to cross-encoder")
     pairs, owners = [], []
     for name, cands in groups.items():
         for c in cands:
@@ -1613,18 +1374,9 @@ async def rerank_multi(combined_query: str, groups: dict, top_ks: dict) -> dict:
 # ===========================================================================
 # STAGE 5 — Context Assembly
 # ===========================================================================
-# Mapping from display names / common keys to prompt template filenames.
-# Add new entries as new document types are introduced.
-_DOC_TYPE_KEY_TO_TEMPLATE = {
-    "writ_petition_civil":    "writ_petition_civil.txt",
-    "writ_petition_criminal": "writ_petition_criminal.txt",
-    "bail_application":       "bail_application.txt",
-    "anticipatory_bail":      "anticipatory_bail.txt",
-    "civil_appeal":           "civil_appeal.txt",
-    "criminal_appeal":        "criminal_appeal.txt",
-    # Legacy fallback — existing writ_petition.txt kept as default
-    "writ_petition":          "writ_petition.txt",
-}
+# Prompt templates live at prompts/document_types/<document_type_key>.txt —
+# resolved by convention (writ_petition.txt is the fallback), so adding a new
+# doc type only requires dropping a template file, not editing a mapping.
 
 
 async def get_effective_structure_rules(engine, court_level: str, overrides: dict) -> list[dict]:
@@ -1716,14 +1468,12 @@ def assemble_prompt(
             "Court under Article 226, specifically citing violation of fundamental rights.]\n"
         )
 
-    # Per-doc-type template routing (replaces hardcoded writ_petition.txt)
-    # Falls back to writ_petition.txt if key is missing or template file doesn't exist.
+    # Per-doc-type template routing by filename convention; falls back to
+    # writ_petition.txt when no template exists for this doc type yet.
     doc_type_key = form_data.get("document_type_key") or ""
-    template_file = _DOC_TYPE_KEY_TO_TEMPLATE.get(doc_type_key, "writ_petition.txt")
     try:
-        template = jinja_env.get_template(f"document_types/{template_file}")
+        template = jinja_env.get_template(f"document_types/{doc_type_key or 'writ_petition'}.txt")
     except Exception:
-        # Graceful fallback if template file not yet created for this doc type
         template = jinja_env.get_template("document_types/writ_petition.txt")
 
     # Bug 4 fix: merge user-provided mandatory_paragraphs (free-text field) into body_paras.
@@ -1774,8 +1524,16 @@ async def verify_citations(draft_text: str, engine) -> list:
 
     # Match patterns like (2019) 4 SCC 123
     case_pattern = re.compile(r'\(\d{4}\)\s*\d+\s*SCC\s*\d+')
-    # Match patterns like Section 302 IPC / Section 21 BNS
-    section_pattern = re.compile(r'Section\s*\d+[A-Z]?\s*(?:of\s*(?:the\s*)?)?(?:IPC|BNS|CrPC|BNSS|COI|SRA|CPC|BSA)')
+    # Match patterns like Section 302 IPC / Section 21 BNS — the recognised
+    # short codes come from legal_codes, so newly ingested acts are verifiable
+    cfg = await _get_runtime_config(engine)
+    short_codes = sorted({code for _, code in cfg["aliases"]}, key=len, reverse=True)
+    if not short_codes:
+        short_codes = ["IPC", "BNS", "CrPC", "BNSS", "COI", "SRA", "CPC", "BSA"]
+    codes_alt = "|".join(re.escape(c) for c in short_codes)
+    section_pattern = re.compile(
+        r'Section\s*\d+[A-Z]?\s*(?:of\s*(?:the\s*)?)?(?:' + codes_alt + r')\b'
+    )
 
     for citation in set(case_pattern.findall(draft_text)):
         try:
@@ -1791,7 +1549,7 @@ async def verify_citations(draft_text: str, engine) -> list:
 
     for citation in set(section_pattern.findall(draft_text)):
         sec_match  = re.search(r'(\d+[A-Z]?)', citation)
-        code_match = re.search(r'(IPC|BNS|CrPC|BNSS|COI|SRA|CPC|BSA)', citation)
+        code_match = re.search(r'(' + codes_alt + r')\b', citation)
         if sec_match and code_match:
             try:
                 async with engine.connect() as conn:

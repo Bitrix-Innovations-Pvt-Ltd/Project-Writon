@@ -440,7 +440,8 @@ async def _embed_statutes_task():
                 # Run the blocking PyTorch encode in a thread pool so we don't hang the server!
                 vectors = await loop.run_in_executor(pool, _do_embed_batch, model, texts)
                 
-                async with engine.begin() as conn:
+                from app.core.database import write_transaction
+                async with write_transaction() as conn:
                     for idx, r in enumerate(batch):
                         await conn.execute(
                             text("UPDATE legal_code_sections SET embedding = :emb WHERE id = :id"),

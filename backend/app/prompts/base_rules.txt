@@ -68,13 +68,49 @@ STRICT RULES (apply to every document):
 
 11. PRAYER CLAUSE FIDELITY: The Prayer clause (inside the PRAYER section) MUST reproduce the FULL text of the RELIEF SOUGHT field verbatim, including ALL qualifying phrases such as "along with interest", "from the date of order", "pendente lite and finally", "with costs", etc. Do NOT summarize, paraphrase, or truncate any part of the relief. If the relief has multiple sub-clauses (a), (b), (c) — retain all of them exactly as written.
 
-12. SIGNATURE BLOCK — MANDATORY AT END OF EVERY SECTION: The advocate signature block MUST appear at the end of EVERY section in the document. Use this exact markdown table format at the bottom of each section (no borders, two columns — left: PLACE/DATED, right: advocate details right-aligned):
+12. SIGNATURE BLOCK — MANDATORY AT END OF EVERY SECTION: The advocate signature block MUST appear at the end of EVERY section in the document. Use this exact HTML structure at the bottom of each section (do not use markdown tables):
 
-| | |
-|:---|---:|
-| PLACE: ______________ | **(ADVOCATE NAME)** |
-| DATED: ______________ | Advocate |
-| | Enrollment No. ENROLLMENT_NO |
-| | Counsel for Petitioner |
+<style>
+.petition-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-top: 80px;
+    width: 100%;
+    font-family: "Times New Roman", serif;
+    font-size: 18px;
+}
+
+.footer-left p,
+.footer-right p {
+    margin: 4px 0;
+}
+
+.footer-right {
+    text-align: center;
+    width: 280px;
+}
+
+.signature-line {
+    width: 250px;
+    border-top: 1.5px solid #000;
+    margin: 0 auto 8px;
+}
+</style>
+
+<footer class="petition-footer">
+    <div class="footer-left">
+        <p><strong>PLACE:</strong> __________________</p>
+        <p><strong>DATED:</strong> __________________</p>
+    </div>
+
+    <div class="footer-right">
+        <div class="signature-line"></div>
+        <p><strong>ADVOCATE NAME</strong></p>
+        <p>Advocate</p>
+        <p><strong>Enrollment No.</strong> ENROLLMENT_NO</p>
+        <p>Counsel for Petitioner</p>
+    </div>
+</footer>
 
 Replace ADVOCATE NAME with the actual advocate name from CASE DETAILS (or `____________________` if not provided). Replace ENROLLMENT_NO with the actual enrollment number (or `_______________` if not provided). This block is MANDATORY inside EVERY section — COVER_AND_INDEX, SYNOPSIS, LIST_OF_DATES, MAIN_PETITION, PRAYER, AFFIDAVIT, VAKALATNAMA, and ANNEXURES. Do NOT omit it from any section.

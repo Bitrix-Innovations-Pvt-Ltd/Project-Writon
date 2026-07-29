@@ -91,10 +91,16 @@ async def keep_db_warm():
                                            WHERE embedding IS NOT NULL LIMIT 1)
                LIMIT 1""",
         ]
+        from app.core.rag import _VEC_PRESQL
+
         while True:
             try:
                 async with engine.connect() as conn:
-                    await conn.execute(text("SET LOCAL ivfflat.probes = 20"))
+                    # Same scan settings the real queries use, so the pages the
+                    # warm-up pulls in are the ones they will read (the corpora
+                    # are HNSW now; the ivfflat setting is a harmless no-op).
+                    for stmt in _VEC_PRESQL:
+                        await conn.execute(text(stmt))
                     for sql in warm_sqls:
                         await conn.execute(text(sql))
             except Exception as e:
@@ -113,8 +119,9 @@ async def embed_missing():
     import sys, os
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from scripts.embed_statutes import embed_statutes
-    import asyncio
-    asyncio.create_task(embed_statutes())
+    # embed_statutes is synchronous (psycopg2 + a blocking model call), so it
+    # runs in a worker thread rather than as a task on the event loop.
+    asyncio.get_running_loop().run_in_executor(None, embed_statutes)
     return {"status": "Embedding started in background. Check backend console."}
 
 

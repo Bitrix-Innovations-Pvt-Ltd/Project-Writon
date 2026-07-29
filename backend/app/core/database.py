@@ -1,5 +1,7 @@
 import os
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from dotenv import load_dotenv
@@ -27,8 +29,24 @@ engine = create_async_engine(
     max_overflow=20,
     pool_timeout=60,
     pool_pre_ping=True,    # Checks if connection is alive before using it
-    pool_recycle=1800      # Recycles connections after 30 minutes to avoid DB timeouts
+    pool_recycle=1800,     # Recycles connections after 30 minutes to avoid DB timeouts
 )
+
+
+@asynccontextmanager
+async def write_transaction():
+    """Transaction that is guaranteed writable — use for every INSERT/UPDATE.
+
+    The Neon endpoint hands out sessions with default_transaction_read_only=on,
+    and its pooler does not reliably carry per-connection overrides, so writes
+    on a plain engine.begin() fail with ReadOnlySQLTransaction (this was
+    silently swallowing the app's writes inside try/except blocks). Declaring
+    the mode inside the transaction is pooling-safe because the pooler pins the
+    server connection for the transaction's duration.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text("SET TRANSACTION READ WRITE"))
+        yield conn
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,

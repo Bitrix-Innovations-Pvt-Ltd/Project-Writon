@@ -27,8 +27,11 @@ from app.core.rag import (
     assemble_prompt,
     verify_citations,
     get_openrouter_client,
-    _SUBJECT_NEEDS_COI,
+    subject_needs_coi,
 )
+
+# Final-generation model — env-configurable like the rewrite model
+GENERATION_MODEL = os.getenv("RAG_GENERATION_MODEL", "anthropic/claude-sonnet-4")
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
 
@@ -174,10 +177,9 @@ async def _rag_stream(req: GenerateRequest):
                 subject_matter=req.subject_matter,
                 query_vectors=query_vectors
             )
-            # Bug 6: only retrieve COI sections when the subject matter is
+
             # constitutionally relevant — prevents education/panchayat Article noise.
-            sm_lower_check = req.subject_matter.lower() if req.subject_matter else ""
-            needs_coi = any(kw in sm_lower_check for kw in _SUBJECT_NEEDS_COI)
+            needs_coi = await subject_needs_coi(req.subject_matter, engine)
             coi_task = (
                 retrieve_statutes(engine, queries, coi_only=True, query_vectors=query_vectors)
                 if needs_coi else asyncio.sleep(0)  # no-op coroutine
@@ -245,11 +247,12 @@ async def _rag_stream(req: GenerateRequest):
     # Persist user defaults if overrides were provided and we have a draft_id
     if req.section_format_overrides and req.draft_id:
         try:
-            async with engine.begin() as conn:
+            from app.core.database import write_transaction
+            async with write_transaction() as conn:
                 from sqlalchemy import text
                 await conn.execute(
                     text("""
-                        UPDATE users 
+                        UPDATE users
                         SET default_section_format_overrides = :overrides
                         WHERE id = (SELECT user_id FROM drafts WHERE id = :d LIMIT 1)
                     """),
@@ -276,7 +279,7 @@ async def _rag_stream(req: GenerateRequest):
 
     try:
         stream = await client.chat.completions.create(
-            model="anthropic/claude-sonnet-4",
+            model=GENERATION_MODEL,
             messages=[{"role": "user", "content": prompt}],
             stream=True,
             temperature=0.2,
@@ -356,14 +359,27 @@ async def suggest_citations(req: GenerateRequest):
             "JUDGMENT_OR_FALLBACK": rag_module.JUDGMENT_OR_FALLBACK,
             "NUM_QUERIES": rag_module.NUM_QUERIES,
             "REWRITE_MODEL": rag_module.REWRITE_MODEL,
+            "LLM_RERANK": rag_module.LLM_RERANK,
+            "CASE_TYPE_FILTER_ENABLED": rag_module.CASE_TYPE_FILTER_ENABLED,
         }
         try:
-            if "probes" in ov:
-                rag_module._VEC_PRESQL = f"SET LOCAL ivfflat.probes = {max(1, min(100, int(ov['probes'])))}"
+            if "probes" in ov or "ef_search" in ov:
+                probes = max(1, min(100, int(ov.get("probes", rag_module.IVFFLAT_PROBES))))
+                ef = max(10, min(400, int(ov.get("ef_search", rag_module.HNSW_EF_SEARCH))))
+                rag_module._VEC_PRESQL = [
+                    f"SET LOCAL ivfflat.probes = {probes}",
+                    f"SET LOCAL hnsw.ef_search = {ef}",
+                    "SET LOCAL hnsw.iterative_scan = strict_order",
+                    f"SET LOCAL hnsw.max_scan_tuples = {rag_module.HNSW_MAX_SCAN_TUPLES}",
+                ]
             if "judgment_or_fallback" in ov:
                 rag_module.JUDGMENT_OR_FALLBACK = bool(ov["judgment_or_fallback"])
             if "num_queries" in ov:
                 rag_module.NUM_QUERIES = max(3, min(7, int(ov["num_queries"])))
+            if "llm_rerank" in ov:
+                rag_module.LLM_RERANK = bool(ov["llm_rerank"])
+            if "case_type_filter" in ov:
+                rag_module.CASE_TYPE_FILTER_ENABLED = bool(ov["case_type_filter"])
             rm = ov.get("rewrite_model")
             if isinstance(rm, str) and rm.startswith(("openai/", "google/", "anthropic/")):
                 rag_module.REWRITE_MODEL = rm
@@ -441,8 +457,7 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
         # Only query the COI corpus when the subject matter is constitutionally
         # relevant (same gating as /generate) — the unconditional COI wave was
         # both wasted latency and Article noise in the suggestions.
-        sm_lower_check = req.subject_matter.lower() if req.subject_matter else ""
-        needs_coi = any(kw in sm_lower_check for kw in _SUBJECT_NEEDS_COI)
+        needs_coi = await subject_needs_coi(req.subject_matter, engine)
         coi_task = (
             retrieve_statutes(
                 engine, queries, None, coi_only=True,
@@ -475,11 +490,15 @@ async def _suggest_citations_impl(req: GenerateRequest, combined_facts: str, dis
     print(f"DEBUG - Judgments retrieved: {len(judgment_results)}")
     print(f"DEBUG - Statutes retrieved: {len(merged_statutes)}")
 
-    # Cross-encoder rerank — both lists scored in a single model call
+    # Rerank — both lists scored in a single model call (cross-encoder, or the
+    # LLM listwise reranker when enabled; the LLM path uses the raw facts)
+    from app.core.rag import RERANK_CANDIDATES
     reranked = await rerank_multi(
         combined_query,
-        groups={"judgments": judgment_results[:25], "statutes": merged_statutes[:25]},
+        groups={"judgments": judgment_results[:RERANK_CANDIDATES],
+                "statutes": merged_statutes[:RERANK_CANDIDATES]},
         top_ks={"judgments": 8, "statutes": 8},
+        facts=combined_facts,
     )
     t_done = time.time()
     # Stage timing — when a user reports a slow Step 6, this line names the stage
