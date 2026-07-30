@@ -78,8 +78,39 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [factsOfCase, setFactsOfCase] = useState('');
   const [grounds, setGrounds] = useState('');
   const [reliefSought, setReliefSought] = useState('');
-  const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({}); 
-  const [uploadError, setUploadError] = useState<string | null>(null); 
+  const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // ── Auto-populate from uploaded documents ──────────────────────────────────
+  // Uploads happen at Step 4, before the draft row exists, so a client-generated
+  // session id is what groups them. Backed by sessionStorage so it survives an
+  // accidental refresh mid-wizard; a ref so reading it never triggers a render.
+  const uploadSessionIdRef = useRef<string>('');
+  if (!uploadSessionIdRef.current && typeof window !== 'undefined') {
+    const key = `writon:upload_session:${params?.id ?? 'new'}`;
+    let sid = window.sessionStorage.getItem(key);
+    if (!sid) {
+      sid = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+      window.sessionStorage.setItem(key, sid);
+    }
+    uploadSessionIdRef.current = sid;
+  }
+
+  type AiSuggestion = { value: any; confidence: number; sourceDoc?: string; reason?: string };
+  const extractionPromiseRef = useRef<Promise<any> | null>(null);
+  const extractionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+  const [aiSuggestions, setAiSuggestions] = useState<Record<string, AiSuggestion>>({});
+  const [aiPreviousValues, setAiPreviousValues] = useState<Record<string, any>>({});
+  const [aiLowConfidence, setAiLowConfidence] = useState<Record<string, AiSuggestion>>({});
+  const [aiWarnings, setAiWarnings] = useState<string[]>([]);
+  // Distinct matters found across the uploads; >1 means a file probably went
+  // into the wrong slot. primaryDocIds scopes the draft to the right matter.
+  const [aiMatters, setAiMatters] = useState<any[]>([]);
+  const [primaryDocIds, setPrimaryDocIds] = useState<number[] | null>(null);
   const [customDocsList, setCustomDocsList] = useState<{document_name: string, description: string}[]>([]);
   const [isAddingCustomDoc, setIsAddingCustomDoc] = useState(false);
   const [newCustomDocName, setNewCustomDocName] = useState('');
@@ -222,10 +253,14 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("draft_id", params?.id || "0");
+    // Send "" rather than the literal "new" — the backend only accepts a numeric
+    // draft_id, and the draft row does not exist yet at this point. The uploads
+    // are linked to the draft later via upload_session_id.
+    formData.append("draft_id", activeDraftId ? String(activeDraftId) : "");
+    formData.append("upload_session_id", uploadSessionIdRef.current);
     formData.append("doc_type", docName);
     formData.append("user_id", userId || "");
-    
+
     try {
       const res = await fetch(`/api/v1/uploads`, {
         method: "POST",
@@ -238,6 +273,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         return;
       }
       setDocStatus(docName, 'uploaded');
+      scheduleExtractionWarmup();
     } catch (err) {
       console.error(err);
       setUploadError("Network error during upload");
@@ -248,6 +284,207 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const setDocStatus = (id: string, status: string) => {
     setUploadedDocs(prev => ({ ...prev, [id]: status }));
   };
+
+  // ── Auto-populate helpers ──────────────────────────────────────────────────
+
+  const getCourtDisplay = () =>
+    courtLevel === 'high' && selectedHighCourt ? `${selectedHighCourt}${selectedHighCourtBench ? ` - ${selectedHighCourtBench}` : ''}` :
+    courtLevel === 'district' && selectedDistrictCourt ? `${selectedDistrictCourt} District Court, ${selectedState}` :
+    courtLevel === 'tribunal' && selectedTribunal ? selectedTribunal :
+    courtLevel === 'tribunal' && selectedSpecialCourt ? selectedSpecialCourt :
+    `${courtLevel.charAt(0).toUpperCase() + courtLevel.slice(1)} Court of India`;
+
+  /**
+   * Mirrors _value_is_filled in backend/app/modules/gapfill/schema_gaps.py.
+   * Matters because the empty form states are '' , [''] and [{date:'',event:''}],
+   * all of which must count as empty so auto-fill may write into them.
+   */
+  const isFilled = (value: any, minLength = 1): boolean => {
+    if (value === null || value === undefined) return false;
+    if (Array.isArray(value)) {
+      return value.some(item => {
+        if (typeof item === 'string') return item.trim().length >= minLength;
+        if (item && typeof item === 'object') {
+          const combined = Object.values(item).filter(Boolean).map(String).join(' ').trim();
+          return combined.length >= minLength;
+        }
+        return false;
+      });
+    }
+    if (typeof value === 'string') return value.trim().length >= minLength;
+    return String(value).trim().length >= minLength;
+  };
+
+  const runExtraction = (force = false) => {
+    setIsExtracting(true);
+    setExtractionError(null);
+    const promise = fetch('/api/v1/uploads/extract-fields', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        // Deliberately NOT scoped by primaryDocIds: extraction has to see every
+        // document to detect that they span more than one matter.
+        upload_session_id: uploadSessionIdRef.current,
+        draft_id: activeDraftId ?? null,
+        document_type: documentType,
+        document_type_key: mapDocTypeToKey(documentType),
+        court_display: getCourtDisplay(),
+        subject_matter: subjectMatter,
+        force,
+      }),
+    })
+      .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+      .finally(() => setIsExtracting(false));
+
+    extractionPromiseRef.current = promise;
+    return promise;
+  };
+
+  // One LLM call across ALL documents, not one per upload — party names from a
+  // cause title in one document and the chronology in another have to be
+  // reconciled together. Debounced so the call is usually already resolved by
+  // the time the user leaves Step 4.
+  const scheduleExtractionWarmup = () => {
+    if (extractionTimerRef.current) clearTimeout(extractionTimerRef.current);
+    extractionTimerRef.current = setTimeout(() => {
+      runExtraction().catch(() => { /* surfaced on Next */ });
+    }, 2500);
+  };
+
+  // Field key -> setter, used by both apply and undo.
+  const aiFieldSetters: Record<string, (v: any) => void> = {
+    petitioners: setPetitioners,
+    respondents: setRespondents,
+    impugned_order_date: setImpugnedOrderDate,
+    dates_and_events: setDatesAndEvents,
+    facts_of_case: setFactsOfCase,
+    jurisdiction_basis: setJurisdictionBasis,
+    relief_sought: setReliefSought,
+  };
+
+  const applyExtraction = (data: any) => {
+    if (!data) return;
+    if (data.status === 'no_docs') return;           // nothing to say — stay silent
+    if (data.status !== 'ok') {
+      setExtractionError(
+        data.status === 'unavailable'
+          ? 'Automatic extraction is not configured on this server. Please fill in the form manually.'
+          : 'Could not read your documents automatically. Please fill in the form manually.'
+      );
+      setAiWarnings(data.warnings || []);
+      return;
+    }
+
+    const applied: Record<string, AiSuggestion> = {};
+    const previous: Record<string, any> = {};
+
+    const put = (key: string, current: any, coerce: (v: any) => any = v => v) => {
+      const field = data.fields?.[key];
+      // Never overwrite anything the user has already typed.
+      if (!field || !isFilled(field.value) || isFilled(current)) return;
+      previous[key] = current;
+      aiFieldSetters[key](coerce(field.value));
+      applied[key] = { value: field.value, confidence: field.confidence, sourceDoc: field.source_doc };
+    };
+
+    put('petitioners', petitioners, (v: string[]) => [...v]);
+    put('respondents', respondents, (v: string[]) => [...v]);
+    put('impugned_order_date', impugnedOrderDate);
+    put('dates_and_events', datesAndEvents,
+        (v: any[]) => v.map(d => ({ date: d.date || '', event: d.event || '' })));
+    put('facts_of_case', factsOfCase);
+    put('jurisdiction_basis', jurisdictionBasis);
+    // Deterministic standard-form skeleton, not extracted prose — see
+    // build_relief_skeleton in backend/app/core/extraction.py.
+    put('relief_sought', reliefSought);
+
+    // Merge, don't replace: a second run (e.g. after uploading one more document)
+    // skips fields that are already filled, and replacing would strip the chip and
+    // Undo from values this feature put there earlier.
+    setAiSuggestions(prev => ({ ...prev, ...applied }));
+    setAiPreviousValues(prev => ({ ...prev, ...previous }));
+    setAiLowConfidence(data.low_confidence || {});
+    setAiWarnings(data.warnings || []);
+    setAiMatters(data.matters || []);
+    // Scope the draft to the matter these fields came from.
+    setPrimaryDocIds(Array.isArray(data.primary_doc_ids) && data.primary_doc_ids.length
+      ? data.primary_doc_ids : null);
+  };
+
+  const clearAiMark = (field: string) => {
+    setAiSuggestions(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  };
+
+  const undoAiField = (field: string) => {
+    // Restores the exact pre-fill shape ('', [''], [{date:'',event:''}]) so the
+    // list renderers do not break on an empty array.
+    if (field in aiPreviousValues) aiFieldSetters[field]?.(aiPreviousValues[field]);
+    clearAiMark(field);
+  };
+
+  const clearAllAiSuggestions = () => {
+    Object.keys(aiSuggestions).forEach(undoAiField);
+  };
+
+  /**
+   * Which form field a low-confidence entry can be applied to, or null when it
+   * is not applicable — e.g. a role conflict has no single correct side, so the
+   * advocate must place the party manually rather than click "Use this".
+   */
+  const lowConfTargetField = (key: string): string | null => {
+    const base = key.replace(/__[a-z_]+$/, '');
+    return aiFieldSetters[base] ? base : null;
+  };
+
+  const acceptLowConfidence = (key: string) => {
+    const suggestion = aiLowConfidence[key];
+    if (!suggestion) return;
+    const field = lowConfTargetField(key);
+    if (!field) return;
+    const setter = aiFieldSetters[field];
+    if (!setter) return;
+
+    if (field === 'petitioners' || field === 'respondents') {
+      const existing = field === 'petitioners' ? petitioners : respondents;
+      const kept = existing.filter(v => v.trim());
+      setter([...kept, ...(Array.isArray(suggestion.value) ? suggestion.value : [suggestion.value])]);
+    } else {
+      setter(suggestion.value);
+    }
+
+    setAiLowConfidence(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const aiSuggestionCount = Object.keys(aiSuggestions).length;
+
+  /** Marks a field as AI-filled, naming the document it came from, with an Undo. */
+  const AiChip = ({ field }: { field: string }) => {
+    const suggestion = aiSuggestions[field];
+    if (!suggestion) return null;
+    return (
+      <span className="inline-flex items-center gap-1.5 ml-2 align-middle">
+        <span className="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase">
+          AI{suggestion.sourceDoc ? ` · ${suggestion.sourceDoc}` : ''}
+        </span>
+        <button type="button" onClick={() => undoAiField(field)}
+          className="text-[10px] font-bold text-on-surface-variant hover:text-error underline">
+          Undo
+        </button>
+      </span>
+    );
+  };
+
+  /** Ring styling so an auto-filled input stays distinguishable when the chip scrolls away. */
+  const aiRing = (field: string) => aiSuggestions[field] ? ' ring-1 ring-primary/40 bg-primary/[0.03]' : '';
 
   // Fetch document types dynamically from API
   useEffect(() => {
@@ -517,6 +754,23 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       }
     }
 
+    // Leaving Documents: pull the auto-fill result before Parties & Facts renders.
+    // The warm-up started 2.5s after the last upload, so this is usually instant.
+    if (currentStep === 4) {
+      if (extractionTimerRef.current) clearTimeout(extractionTimerRef.current);
+      const anyUploaded = Object.values(uploadedDocs).some(v => v === 'uploaded');
+      if (anyUploaded) {
+        try {
+          applyExtraction(await (extractionPromiseRef.current ?? runExtraction()));
+        } catch (e) {
+          console.error('Auto-fill extraction failed', e);
+          setExtractionError('Could not read your documents automatically. Please fill in the form manually.');
+        }
+      }
+      setCurrentStep(5);
+      return;
+    }
+
     if (currentStep === 5) {
       setCurrentStep(5.5);
     } else if (currentStep === 5.5) {
@@ -558,6 +812,31 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     return 'writ_petition_civil';
   };
 
+  /**
+   * `jurisdiction_basis` is one form field with five meanings. Mirrors
+   * _JURISDICTION_SPECS in backend/app/core/extraction.py and the CASE DETAILS
+   * block of app/prompts/document_types/*.txt — keep the three in sync.
+   */
+  const jurisdictionFieldSpec = (docTypeKey: string) => {
+    switch (docTypeKey) {
+      case 'bail_application':
+        return { label: 'Crime Number / FIR No.', hint: 'The FIR in which bail is sought.',
+                 placeholder: 'e.g. FIR No. 187 of 2026, P.S. Kavi Nagar, Ghaziabad, u/s 316(2) BNS' };
+      case 'anticipatory_bail':
+        return { label: 'FIR / Case Reference', hint: 'The FIR in which arrest is apprehended.',
+                 placeholder: 'e.g. FIR No. 187 of 2026, P.S. Kavi Nagar, Ghaziabad, u/s 316(2) BNS' };
+      case 'civil_appeal':
+        return { label: 'Court Below', hint: 'The court whose decree or judgment is under appeal.',
+                 placeholder: 'e.g. Civil Judge (Senior Division), Ghaziabad, in Suit No. 45 of 2023' };
+      case 'criminal_appeal':
+        return { label: 'Trial Court / Sessions Court', hint: 'The court whose judgment is under appeal.',
+                 placeholder: 'e.g. Sessions Judge, Lucknow, in S.T. No. 120 of 2024' };
+      default:
+        return { label: 'Jurisdiction Basis', hint: 'Why this court has jurisdiction.',
+                 placeholder: 'e.g. Cause of action arose in Delhi' };
+    }
+  };
+
   const fetchCitations = async () => {
     setIsLoadingCitations(true);
     setSuggestedJudgments([]);
@@ -591,6 +870,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       impugned_order_date: impugnedOrderDate || null,
       dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
       draft_id: activeDraftId,
+      upload_session_id: uploadSessionIdRef.current,
+      include_doc_ids: primaryDocIds,
       search_hint: searchHint.trim() || undefined
     };
 
@@ -676,6 +957,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       selected_judgments: suggestedJudgments.filter(j => selectedJudgmentIds.has(j.id)),
       selected_statutes: suggestedStatutes.filter(s => selectedStatuteIds.has(s.id)),
       draft_id: activeDraftId,
+      upload_session_id: uploadSessionIdRef.current,
+      include_doc_ids: primaryDocIds,
       section_format_overrides: sectionFormatOverrides
     };
 
@@ -1510,7 +1793,112 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               <div className="mb-8">
                 <h2 className="font-display-lg text-2xl font-bold text-on-surface mb-1">Parties & Facts</h2>
               </div>
-              
+
+              {extractionError && (
+                <div className="mb-6 rounded-xl border border-outline-variant bg-surface-container-low p-4 flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-2">
+                    <span className="material-symbols-outlined text-on-surface-variant text-[18px] mt-0.5">info</span>
+                    <p className="text-sm text-on-surface-variant">{extractionError}</p>
+                  </div>
+                  <button
+                    onClick={() => runExtraction(true).then(applyExtraction).catch(() => setExtractionError('Could not read your documents automatically. Please fill in the form manually.'))}
+                    disabled={isExtracting}
+                    className="shrink-0 text-xs font-bold text-primary hover:text-[#004131] underline disabled:opacity-50">
+                    {isExtracting ? 'Trying…' : 'Try again'}
+                  </button>
+                </div>
+              )}
+
+              {(aiSuggestionCount > 0 || Object.keys(aiLowConfidence).length > 0) && (
+                <div className="mb-6 rounded-xl border border-primary/30 bg-primary/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-2">
+                      <span className="material-symbols-outlined text-primary text-[18px] mt-0.5">auto_awesome</span>
+                      <div>
+                        <p className="text-sm font-bold text-on-surface">
+                          {aiSuggestionCount > 0
+                            ? `${aiSuggestionCount} field${aiSuggestionCount === 1 ? '' : 's'} filled in from your uploaded documents`
+                            : 'Some details were found in your documents but need your confirmation'}
+                        </p>
+                        <p className="text-xs text-on-surface-variant mt-0.5">
+                          These are AI suggestions. Please read every one before continuing — you are responsible for what is filed.
+                        </p>
+                      </div>
+                    </div>
+                    {aiSuggestionCount > 0 && (
+                      <button onClick={clearAllAiSuggestions}
+                        className="shrink-0 text-xs font-bold text-on-surface-variant hover:text-error underline">
+                        Clear all
+                      </button>
+                    )}
+                  </div>
+
+                  {aiMatters.length > 1 && (
+                    <div className="mt-3 rounded-lg border border-error/40 bg-error/5 p-3">
+                      <p className="text-xs font-bold text-error flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[16px]">warning</span>
+                        Your uploads cover {aiMatters.length} different matters
+                      </p>
+                      <p className="text-[11px] text-on-surface-variant mt-1">
+                        Fields were filled from the primary matter only, and the draft will use just its
+                        documents. Check whether a file went into the wrong slot.
+                      </p>
+                      <ul className="mt-2 space-y-1">
+                        {aiMatters.map((m: any, i: number) => (
+                          <li key={`matter-${i}`} className="text-[11px] flex items-start gap-2">
+                            <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${m.is_primary ? 'bg-primary/15 text-primary' : 'bg-outline-variant/40 text-on-surface-variant'}`}>
+                              {m.is_primary ? 'Using' : 'Ignored'}
+                            </span>
+                            <span className="text-on-surface">
+                              {[m.case_ref, m.court, m.parties].filter(Boolean).join(' · ') || 'Unidentified matter'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {aiWarnings.length > 0 && (
+                    <ul className="mt-3 text-xs text-on-surface-variant list-disc pl-5 space-y-1">
+                      {aiWarnings.map((w, i) => <li key={`warn-${i}`}>{w}</li>)}
+                    </ul>
+                  )}
+
+                  {Object.keys(aiLowConfidence).length > 0 && (
+                    <details className="mt-3">
+                      <summary className="cursor-pointer text-xs font-bold text-on-surface-variant hover:text-on-surface">
+                        {Object.keys(aiLowConfidence).length} uncertain value(s) were not filled in — review
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        {Object.entries(aiLowConfidence).map(([key, s]) => (
+                          <div key={key} className="flex items-start justify-between gap-3 bg-white/60 rounded-lg p-2.5 border border-outline-variant">
+                            <div className="min-w-0">
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">
+                                {key.replace(/__ungrounded$/, '').replace(/_/g, ' ')}
+                              </p>
+                              <p className="text-xs text-on-surface break-words">
+                                {Array.isArray(s.value) ? s.value.map(v => typeof v === 'string' ? v : JSON.stringify(v)).join('; ') : String(s.value)}
+                              </p>
+                              {s.reason && <p className="text-[10px] text-on-surface-variant mt-0.5 italic">{s.reason}</p>}
+                            </div>
+                            {lowConfTargetField(key) ? (
+                              <button onClick={() => acceptLowConfidence(key)}
+                                className="shrink-0 text-[11px] font-bold text-primary hover:text-[#004131] underline">
+                                Use this
+                              </button>
+                            ) : (
+                              <span className="shrink-0 text-[11px] font-bold text-on-surface-variant">
+                                Add manually
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-6">
                 {/* Advocate Details */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-surface-container-lowest p-4 rounded-xl border border-outline-variant">
@@ -1532,11 +1920,14 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
 
                 {/* Petitioners */}
                 <div>
-                  <label className="block text-sm font-bold text-on-surface mb-2">Petitioner / Appellant / Complainant *</label>
+                  <label className="block text-sm font-bold text-on-surface mb-2">
+                    Petitioner / Appellant / Complainant *
+                    <AiChip field="petitioners" />
+                  </label>
                   <div className="space-y-3">
                     {petitioners.map((pet, index) => (
                       <div key={`pet-${index}`} className="flex gap-2">
-                        <input type="text" value={pet} onChange={(e) => updatePetitioner(index, e.target.value)} placeholder="Full name, s/o, d/o, R/o..." className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all" />
+                        <input type="text" value={pet} onChange={(e) => { updatePetitioner(index, e.target.value); clearAiMark('petitioners'); }} placeholder="Full name, s/o, d/o, R/o..." className={`w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all${aiRing('petitioners')}`} />
                         {petitioners.length > 1 && (
                           <button onClick={() => removePetitioner(index)} className="p-3 text-error hover:bg-error/10 rounded-lg transition-colors border border-transparent shrink-0">
                             <span className="material-symbols-outlined text-sm">delete</span>
@@ -1552,11 +1943,14 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 
                 {/* Respondents */}
                 <div>
-                  <label className="block text-sm font-bold text-on-surface mb-2">Respondent / Opposite Party *</label>
+                  <label className="block text-sm font-bold text-on-surface mb-2">
+                    Respondent / Opposite Party *
+                    <AiChip field="respondents" />
+                  </label>
                   <div className="space-y-3">
                     {respondents.map((res, index) => (
                       <div key={`res-${index}`} className="flex gap-2">
-                        <input type="text" value={res} onChange={(e) => updateRespondent(index, e.target.value)} placeholder="Full name or designation..." className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all" />
+                        <input type="text" value={res} onChange={(e) => { updateRespondent(index, e.target.value); clearAiMark('respondents'); }} placeholder="Full name or designation..." className={`w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all${aiRing('respondents')}`} />
                         {respondents.length > 1 && (
                           <button onClick={() => removeRespondent(index)} className="p-3 text-error hover:bg-error/10 rounded-lg transition-colors border border-transparent shrink-0">
                             <span className="material-symbols-outlined text-sm">delete</span>
@@ -1573,30 +1967,42 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 {/* New Case Details */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="col-span-full">
-                    <label className="block text-sm font-bold text-on-surface mb-1">Facts of Case *</label>
+                    <label className="block text-sm font-bold text-on-surface mb-1">
+                      Facts of Case *
+                      <AiChip field="facts_of_case" />
+                    </label>
                     <p className="text-xs text-on-surface-variant mb-2">Describe the facts in detail. The AI will use this to draft the petition body.</p>
-                    <textarea value={factsOfCase} onChange={(e) => setFactsOfCase(e.target.value)} placeholder="e.g. The petitioner was employed as... On [date], the respondent passed an order dated..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[140px] bg-white" />
+                    <textarea value={factsOfCase} onChange={(e) => { setFactsOfCase(e.target.value); clearAiMark('facts_of_case'); }} placeholder="e.g. The petitioner was employed as... On [date], the respondent passed an order dated..." className={`w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[140px] bg-white${aiRing('facts_of_case')}`} />
                   </div>
                   <div className="col-span-full">
-                    <label className="block text-sm font-bold text-on-surface mb-1">Impugned Order / FIR Date</label>
+                    <label className="block text-sm font-bold text-on-surface mb-1">
+                      Impugned Order / FIR Date
+                      <AiChip field="impugned_order_date" />
+                    </label>
                     <p className="text-xs text-on-surface-variant mb-2">Date of the order, FIR, or arrest being challenged (if applicable).</p>
-                    <input type="date" value={impugnedOrderDate} onChange={(e) => setImpugnedOrderDate(e.target.value)} className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
+                    <input type="date" value={impugnedOrderDate} onChange={(e) => { setImpugnedOrderDate(e.target.value); clearAiMark('impugned_order_date'); }} className={`w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white${aiRing('impugned_order_date')}`} />
                   </div>
                   <div className="col-span-full">
-                    <label className="block text-sm font-bold text-on-surface mb-1">Jurisdiction Basis</label>
-                    <p className="text-xs text-on-surface-variant mb-2">Why this court has jurisdiction</p>
-                    <input type="text" value={jurisdictionBasis} onChange={(e) => setJurisdictionBasis(e.target.value)} placeholder="e.g. Cause of action arose in Delhi" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
+                    <label className="block text-sm font-bold text-on-surface mb-1">
+                      {jurisdictionFieldSpec(mapDocTypeToKey(documentType)).label}
+                      <AiChip field="jurisdiction_basis" />
+                    </label>
+                    <p className="text-xs text-on-surface-variant mb-2">{jurisdictionFieldSpec(mapDocTypeToKey(documentType)).hint}</p>
+                    <input type="text" value={jurisdictionBasis} onChange={(e) => { setJurisdictionBasis(e.target.value); clearAiMark('jurisdiction_basis'); }} placeholder={jurisdictionFieldSpec(mapDocTypeToKey(documentType)).placeholder} className={`w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white${aiRing('jurisdiction_basis')}`} />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-bold text-on-surface mb-1">List of Dates and Events</label>
+                  <label className="block text-sm font-bold text-on-surface mb-1">
+                    List of Dates and Events
+                    <AiChip field="dates_and_events" />
+                  </label>
                   <p className="text-xs text-on-surface-variant mb-2">Provide a chronological list of important dates and events.</p>
                   <div className="space-y-3">
                     {datesAndEvents.map((de, index) => (
                       <div key={`de-${index}`} className="flex gap-2 items-start">
-                        <input type="date" value={de.date} onChange={(e) => updateDateEvent(index, 'date', e.target.value)} className="w-[140px] p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white shrink-0" />
-                        <textarea value={de.event} onChange={(e) => updateDateEvent(index, 'event', e.target.value)} placeholder="Description of the event..." className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[60px]" />
+                        <input type="date" value={de.date} onChange={(e) => { updateDateEvent(index, 'date', e.target.value); clearAiMark('dates_and_events'); }} className={`w-[140px] p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white shrink-0${aiRing('dates_and_events')}`} />
+                        <textarea value={de.event} onChange={(e) => { updateDateEvent(index, 'event', e.target.value); clearAiMark('dates_and_events'); }} placeholder="Description of the event..." className={`w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[60px]${aiRing('dates_and_events')}`} />
                         {datesAndEvents.length > 1 && (
                           <button onClick={() => removeDateEvent(index)} className="p-3 text-error hover:bg-error/10 rounded-lg transition-colors border border-transparent shrink-0 mt-1">
                             <span className="material-symbols-outlined text-sm">delete</span>
@@ -1617,9 +2023,16 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-bold text-on-surface mb-1">Relief Sought</label>
-                  <p className="text-xs text-on-surface-variant mb-2">What you want the court to order. Leave blank for AI to draft.</p>
-                  <textarea value={reliefSought} onChange={(e) => setReliefSought(e.target.value)} placeholder="i. Issue a writ of mandamus directing... ii. Stay the operation of..." className="w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]" />
+                  <label className="block text-sm font-bold text-on-surface mb-1">
+                    Relief Sought
+                    <AiChip field="relief_sought" />
+                  </label>
+                  <p className="text-xs text-on-surface-variant mb-2">
+                    {aiSuggestions['relief_sought']
+                      ? 'Standard-form prayer covering the core relief only. Add any consequential, ancillary or interim relief — this text is reproduced word-for-word in the Prayer clause.'
+                      : 'What you want the court to order. Leave blank for AI to draft.'}
+                  </p>
+                  <textarea value={reliefSought} onChange={(e) => { setReliefSought(e.target.value); clearAiMark('relief_sought'); }} placeholder="i. Issue a writ of mandamus directing... ii. Stay the operation of..." className={`w-full p-4 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all min-h-[80px]${aiRing('relief_sought')}`} />
                 </div>
 
                 <div>
@@ -1675,6 +2088,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               <GapFillChat 
                 draftId={activeDraftId !== undefined ? activeDraftId : NaN}
                 documentTypeKey={mapDocTypeToKey(documentType)}
+                uploadSessionId={uploadSessionIdRef.current}
                 formData={{
                   court_level: courtLevel,
                   document_type: documentType,
@@ -2113,10 +2527,15 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   )) ||
                   (currentStep === 2 && !documentType) ||
                   (currentStep === 3 && !subjectMatter) ||
-                  isLoadingDocs || isLoadingCitations
+                  isLoadingDocs || isLoadingCitations || (currentStep === 4 && isExtracting)
                 }
                 className="flex items-center gap-2 bg-primary text-white px-8 py-3 rounded-lg font-bold shadow-md hover:-translate-y-0.5 hover:shadow-lg hover:bg-[#004131] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 transition-all duration-300">
-                {currentStep === 6 ? (
+                {currentStep === 4 && isExtracting ? (
+                  <>
+                    <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                    Reading your documents…
+                  </>
+                ) : currentStep === 6 ? (
                   <>Generate Draft <span className="material-symbols-outlined text-[18px]">auto_awesome</span></>
                 ) : (
                   <>Next <span className="material-symbols-outlined text-sm">arrow_forward</span></>

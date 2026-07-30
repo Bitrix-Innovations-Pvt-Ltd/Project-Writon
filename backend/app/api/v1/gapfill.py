@@ -33,6 +33,8 @@ class GapFillStartRequest(BaseModel):
     draft_id: Optional[int] = None
     document_type_key: str
     form_data: dict
+    # Groups the documents uploaded at Step 4, before this draft row existed.
+    upload_session_id: Optional[str] = None
 
 
 class GapFillAnswerRequest(BaseModel):
@@ -107,6 +109,27 @@ async def start_gapfill(req: GapFillStartRequest, db: Session = Depends(get_db))
             db.add(draft)
             await db.commit()
             await db.refresh(draft)
+
+    # ── Back-link this session's uploads ──────────────────────────────────────
+    # Documents are uploaded at Step 4, before the draft row exists, so they are
+    # stored with draft_id NULL. This is the point at which the id first exists;
+    # without this the generation prompt never sees any uploaded document.
+    if req.upload_session_id:
+        try:
+            from app.core.database import write_transaction
+            from sqlalchemy import text as sql_text
+            # write_transaction, not db: Neon hands out read-only sessions and a
+            # plain UPDATE can silently no-op (see core/database.py).
+            async with write_transaction() as conn:
+                await conn.execute(
+                    sql_text(
+                        "UPDATE uploaded_docs SET draft_id = :did "
+                        "WHERE upload_session_id = :sid AND draft_id IS NULL"
+                    ),
+                    {"did": draft_id, "sid": req.upload_session_id},
+                )
+        except Exception as e:
+            print(f"[gapfill] upload back-link failed (non-fatal): {e}")
 
     # Clear any stale context-gap cache from a previous session for this draft
     await cache_delete(_ctx_queue_key(draft_id))

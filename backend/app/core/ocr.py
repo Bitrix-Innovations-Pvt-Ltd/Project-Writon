@@ -11,6 +11,28 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"))
 openrouter_key = os.getenv("OPENROUTER_API_KEY")
 
+# ── PDF page limits ──────────────────────────────────────────────────────────
+# Digital-text pages and scanned pages have completely different costs, so they
+# get separate budgets rather than one shared cap:
+#
+#   * page.get_text() is local, free and fast — a 200-page digital judgment
+#     extracts in well under a second. Only a high safety bound applies.
+#   * A scanned page costs one gpt-4o-mini vision call. Upload is synchronous
+#     (the advocate waits on the request), so this is the limit that actually
+#     matters for both latency and spend.
+#
+# Uploads are capped at 5 MB (api/v1/uploads.py), which bounds the worst case.
+# Downstream prompt budgets live in core/uploaded_docs.py and core/extraction.py,
+# so a long document cannot flood the drafting prompt.
+MAX_PDF_PAGES = int(os.getenv("OCR_MAX_PDF_PAGES", "300"))
+MAX_VISION_PAGES = int(os.getenv("OCR_MAX_VISION_PAGES", "25"))
+VISION_WORKERS = int(os.getenv("OCR_VISION_WORKERS", "8"))
+
+# Scanned pages are rendered at this zoom before being sent to the vision model.
+# PyMuPDF's default is 72 DPI, at which scanned Indian court orders are often
+# barely legible and OCR quality suffers badly; 2x ≈ 144 DPI reads reliably.
+VISION_ZOOM = float(os.getenv("OCR_VISION_ZOOM", "2.0"))
+
 # For Windows development, user might need to specify tesseract path if it's not in PATH.
 if platform.system() == "Windows":
     pass
@@ -43,58 +65,108 @@ def extract_text_with_llm(file_bytes: bytes, mime_type: str) -> str:
         print(f"LLM OCR Fallback Failed: {str(e)}")
         return ""
 
+def _extract_pdf(file_bytes: bytes) -> str:
+    """Extract text from every page of a PDF, within the budgets above.
+
+    Digital text is taken from all pages. Scanned pages are rendered and sent to
+    the vision model up to MAX_VISION_PAGES; any beyond that are marked in place
+    so the gap is visible to the reader and to the drafting prompt rather than
+    silently swallowed.
+    """
+    pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        total_pages = len(pdf_document)
+        num_pages = min(MAX_PDF_PAGES, total_pages)
+
+        page_tasks = []
+        vision_budget = MAX_VISION_PAGES
+        skipped_scanned = []
+
+        for page_num in range(num_pages):
+            page = pdf_document.load_page(page_num)
+            text = page.get_text()
+
+            if text.strip():
+                page_tasks.append({"page_num": page_num, "type": "text", "text": text})
+                continue
+
+            # Scanned page — needs the vision model.
+            if vision_budget <= 0:
+                skipped_scanned.append(page_num + 1)
+                page_tasks.append({
+                    "page_num": page_num,
+                    "type": "text",
+                    "text": "[Scanned page not read - image OCR limit reached.]",
+                })
+                continue
+
+            try:
+                pix = page.get_pixmap(matrix=fitz.Matrix(VISION_ZOOM, VISION_ZOOM))
+                page_tasks.append({
+                    "page_num": page_num, "type": "image", "bytes": pix.tobytes("png"),
+                })
+                vision_budget -= 1
+            except Exception as e:
+                print(f"Failed to get pixmap on PDF page {page_num}: {str(e)}")
+                page_tasks.append({"page_num": page_num, "type": "text", "text": ""})
+    finally:
+        pdf_document.close()
+
+    # Only scanned pages need the thread pool; digital text is already in hand.
+    image_tasks = [t for t in page_tasks if t["type"] == "image"]
+    if image_tasks:
+        import concurrent.futures
+
+        def run_llm_for_task(task):
+            try:
+                return extract_text_with_llm(task["bytes"], "image/png")
+            except Exception as e:
+                print(f"Failed LLM Vision on page {task['page_num']}: {e}")
+                return ""
+
+        workers = max(1, min(VISION_WORKERS, len(image_tasks)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for task, result in zip(image_tasks, executor.map(run_llm_for_task, image_tasks)):
+                task["text"] = result
+
+    parts = [
+        f"\n--- Page {t['page_num'] + 1} ---\n{t.get('text', '')}"
+        for t in page_tasks
+    ]
+
+    notices = []
+    if total_pages > num_pages:
+        notices.append(
+            f"Only the first {num_pages} of {total_pages} pages were read "
+            f"(page limit)."
+        )
+    if skipped_scanned:
+        preview = ", ".join(str(p) for p in skipped_scanned[:10])
+        more = f" and {len(skipped_scanned) - 10} more" if len(skipped_scanned) > 10 else ""
+        notices.append(
+            f"{len(skipped_scanned)} scanned page(s) were not read by image OCR "
+            f"(pages {preview}{more})."
+        )
+    if notices:
+        parts.append("\n\n[NOTE: " + " ".join(notices) + "]")
+
+    return "".join(parts)
+
+
 def extract_text_from_bytes(file_bytes: bytes, filename: str) -> str:
     """
-    Extracts text from an image or PDF (first 5 pages max).
-    Uses PyMuPDF (fitz) for PDFs.
-    Uses Tesseract for images, falling back to LLM Vision API if Tesseract fails/missing.
+    Extracts text from an image, PDF or DOCX.
+
+    PDFs: all pages of digital text (up to MAX_PDF_PAGES); scanned pages go to
+    LLM Vision up to MAX_VISION_PAGES.
+    Images: LLM Vision, falling back to Tesseract if it fails or is missing.
     """
     ext = filename.lower().split('.')[-1]
     extracted_text = ""
-    
+
     try:
         if ext == 'pdf':
-            # Open PDF from bytes using PyMuPDF
-            pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
-            num_pages = min(5, len(pdf_document))
-            
-            page_tasks = []
-            for page_num in range(num_pages):
-                page = pdf_document.load_page(page_num)
-                # Try to extract digital text first
-                text = page.get_text()
-                
-                if not text.strip():
-                    # Fallback to LLM Vision for scanned PDF pages
-                    try:
-                        pix = page.get_pixmap()
-                        img_bytes = pix.tobytes("png")
-                        page_tasks.append({"page_num": page_num, "type": "image", "bytes": img_bytes})
-                    except Exception as e:
-                        print(f"Failed to get pixmap on PDF page {page_num}: {str(e)}")
-                        page_tasks.append({"page_num": page_num, "type": "text", "text": ""})
-                else:
-                    page_tasks.append({"page_num": page_num, "type": "text", "text": text})
-                    
-            pdf_document.close()
-            
-            import concurrent.futures
-            
-            def run_llm_for_task(task):
-                if task["type"] == "text":
-                    return task["text"]
-                try:
-                    return extract_text_with_llm(task["bytes"], "image/png")
-                except Exception as e:
-                    print(f"Failed LLM Vision on page {task['page_num']}: {e}")
-                    return ""
-                    
-            # Run OpenRouter LLM Vision concurrently for all scanned pages
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(run_llm_for_task, page_tasks))
-                
-            for idx, res_text in enumerate(results):
-                extracted_text += f"\n--- Page {page_tasks[idx]['page_num']+1} ---\n{res_text}"
+            extracted_text = _extract_pdf(file_bytes)
         elif ext in ['png', 'jpg', 'jpeg', 'tiff', 'bmp']:
             # Use LLM Vision (OpenRouter) as primary for image OCR
             mime_type = f"image/{'jpeg' if ext in ['jpg', 'jpeg'] else ext}"

@@ -6,10 +6,12 @@ interface GapFillChatProps {
   draftId: number;
   documentTypeKey: string;
   formData: any;
+  /** Groups the Step 4 uploads so the backend can link them to this draft. */
+  uploadSessionId?: string;
   onComplete: (summary: any) => void;
 }
 
-export default function GapFillChat({ draftId, documentTypeKey, formData, onComplete }: GapFillChatProps) {
+export default function GapFillChat({ draftId, documentTypeKey, formData, uploadSessionId, onComplete }: GapFillChatProps) {
   const [messages, setMessages] = useState<any[]>([]);
   const [currentGap, setCurrentGap] = useState<any>(null);
   const [inputValue, setInputValue] = useState("");
@@ -39,6 +41,7 @@ export default function GapFillChat({ draftId, documentTypeKey, formData, onComp
           draft_id: activeDraftId,
           document_type_key: documentTypeKey,
           form_data: formData,
+          upload_session_id: uploadSessionId || null,
         })
       });
       const data = await res.json();

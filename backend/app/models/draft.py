@@ -40,6 +40,9 @@ class UploadedDoc(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     draft_id = Column(BigInteger, ForeignKey("drafts.id", ondelete="CASCADE"))
+    # Groups uploads made in one wizard session, before the draft row exists.
+    # Back-linked to draft_id by /gapfill/start once the draft is created.
+    upload_session_id = Column(String(64), index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     original_filename = Column(String)
     r2_key = Column(String)

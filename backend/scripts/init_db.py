@@ -90,6 +90,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS uploaded_docs (
                 id BIGSERIAL PRIMARY KEY,
                 draft_id BIGINT REFERENCES drafts(id) ON DELETE CASCADE,
+                upload_session_id TEXT,
                 user_id UUID REFERENCES users(id),
                 original_filename TEXT,
                 r2_key TEXT,
@@ -100,6 +101,15 @@ def init_db():
                 uploaded_at TIMESTAMPTZ DEFAULT now()
             );
         """, "Creating 'uploaded_docs' table")
+
+        # Upgrade path for databases created before upload_session_id existed.
+        execute_safe(cursor,
+            "ALTER TABLE uploaded_docs ADD COLUMN IF NOT EXISTS upload_session_id TEXT;",
+            "Adding uploaded_docs.upload_session_id")
+        execute_safe(cursor,
+            "CREATE INDEX IF NOT EXISTS idx_uploaded_docs_session "
+            "ON uploaded_docs(upload_session_id) WHERE upload_session_id IS NOT NULL;",
+            "Creating index idx_uploaded_docs_session")
 
         execute_safe(cursor, """
             CREATE TABLE IF NOT EXISTS judgments (

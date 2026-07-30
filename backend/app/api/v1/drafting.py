@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, engine
+from app.core.uploaded_docs import build_uploaded_docs_context, fetch_uploaded_docs
 from app.core.rag import (
     rewrite_queries,
     retrieve_judgment_chunks,
@@ -52,6 +53,12 @@ async def _get_embedding_fn():
 # ---------------------------------------------------------------------------
 class GenerateRequest(BaseModel):
     draft_id: Optional[int] = None
+    # Set at Step 4, before the draft row exists. Lets the uploaded documents be
+    # found even if the /gapfill/start back-link did not run.
+    upload_session_id: Optional[str] = None
+    # Documents belonging to the matter actually being drafted, as identified by
+    # auto-populate. Keeps a wrongly-uploaded file's case out of the draft.
+    include_doc_ids: Optional[list[int]] = None
     court_level: str = "supreme"
     court_display: str = "Supreme Court of India"
     court_identity_id: Optional[int] = None   # sent explicitly from frontend Step 1b dropdown
@@ -93,19 +100,21 @@ async def _rag_stream(req: GenerateRequest):
     form_data = req.dict()
 
     # ── Stage 1: Query Rewriting & OCR Text Fetching ─────────────────────────────────────────
-    ocr_texts = []
+    uploaded_docs_context = ""
     try:
         async with engine.connect() as conn:
             from sqlalchemy import text
+
+            # Looked up by draft_id OR upload_session_id so the documents are
+            # still found when the /gapfill/start back-link did not run.
+            docs = await fetch_uploaded_docs(
+                conn, req.draft_id, req.upload_session_id, req.include_doc_ids)
+            uploaded_docs_context, docs_used = build_uploaded_docs_context(docs)
+            if docs_used:
+                print(f"[generate] uploaded docs in prompt: "
+                      f"{[(d['id'], d['label'], d['chars_used']) for d in docs_used]}")
+
             if req.draft_id:
-                res = await conn.execute(
-                    text("SELECT ocr_text FROM uploaded_docs WHERE draft_id = :d AND ocr_text IS NOT NULL"),
-                    {"d": req.draft_id}
-                )
-                for row in res:
-                    if len(row[0]) > 50:
-                        ocr_texts.append(row[0])
-                        
                 # Fetch additional_context from the chatbot phase
                 draft_res = await conn.execute(
                     text("SELECT additional_context FROM drafts WHERE id = :d LIMIT 1"),
@@ -132,8 +141,6 @@ async def _rag_stream(req: GenerateRequest):
                         print(f"Error parsing additional_context: {e}")
     except Exception as e:
         print(f"Error fetching OCR text / additional context: {e}")
-
-    uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
 
     # queries populated in the RAG branch below; pre-init for court_rules scope
     queries: list = []
@@ -328,21 +335,15 @@ async def suggest_citations(req: GenerateRequest):
     from app.core.rag import rerank_multi
     from app.core.redis import cache_get, cache_set
 
-    ocr_texts = []
+    uploaded_docs_context = ""
     try:
         async with engine.connect() as conn:
-            from sqlalchemy import text
-            res = await conn.execute(
-                text("SELECT ocr_text FROM uploaded_docs WHERE draft_id = :d AND ocr_text IS NOT NULL"),
-                {"d": req.draft_id}
-            )
-            for row in res:
-                if len(row[0]) > 50:
-                    ocr_texts.append(row[0])
+            docs = await fetch_uploaded_docs(
+                conn, req.draft_id, req.upload_session_id, req.include_doc_ids)
+            uploaded_docs_context, _ = build_uploaded_docs_context(docs)
     except Exception as e:
         print(f"Error fetching OCR text: {e}")
 
-    uploaded_docs_context = "\n\n--- UPLOADED DOCUMENTS ---\n" + "\n\n".join(ocr_texts) if ocr_texts else ""
     combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{req.mandatory_paragraphs}\n{uploaded_docs_context}".strip()
 
     # Benchmark/dev knob overrides — whitelisted keys only. The module attrs
