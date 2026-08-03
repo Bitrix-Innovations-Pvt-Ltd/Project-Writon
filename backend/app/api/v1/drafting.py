@@ -145,11 +145,22 @@ async def _rag_stream(req: GenerateRequest):
     # queries populated in the RAG branch below; pre-init for court_rules scope
     queries: list = []
 
-    if req.selected_judgments is not None and req.selected_statutes is not None:
+    # Honour the Step 6 selection only when something was actually selected.
+    # `[] is not None` is True, so testing for None alone treated "Step 6 failed
+    # to load" / "user clicked through before citations arrived" as a deliberate
+    # choice of zero authorities: the branch was taken with empty lists, the RAG
+    # fallback never ran, and the draft was generated with no citations at all.
+    # One list empty and the other populated IS deliberate, so it is respected.
+    if req.selected_judgments or req.selected_statutes:
         # User has pre-selected the citations in Phase 6, bypass Stage 1-4
-        top_judgments = req.selected_judgments
-        top_statutes = req.selected_statutes
+        top_judgments = req.selected_judgments or []
+        top_statutes = req.selected_statutes or []
+        print(f"[generate] using Step 6 selection: "
+              f"{len(top_judgments)} judgment(s), {len(top_statutes)} statute(s)")
     else:
+        if req.selected_judgments is not None or req.selected_statutes is not None:
+            print("[generate] Step 6 selection arrived empty — falling back to "
+                  "retrieval so the draft is not written without any authority")
         # Fallback to full RAG retrieval if not provided (old behavior)
         combined_facts = f"{req.facts_of_case}\n{req.case_description}\n{req.grounds}\n{uploaded_docs_context}".strip()
         yield "event: status\ndata: Rewriting queries...\n\n"

@@ -8,7 +8,16 @@ interface GapFillChatProps {
   formData: any;
   /** Groups the Step 4 uploads so the backend can link them to this draft. */
   uploadSessionId?: string;
-  onComplete: (summary: any) => void;
+  /**
+   * Called once the gapfill session finishes. All three call sites below pass
+   * the same arguments; the declaration previously listed only `summary`, so
+   * the parent's handler params were implicitly `any` and the extra arguments
+   * were untyped.
+   *
+   * `newDraftId` is the id of the draft row created by /gapfill/start — the
+   * parent needs it because the row does not exist until this step runs.
+   */
+  onComplete: (summary: any, updatedFormData: any, newDraftId: number | null) => void;
 }
 
 export default function GapFillChat({ draftId, documentTypeKey, formData, uploadSessionId, onComplete }: GapFillChatProps) {

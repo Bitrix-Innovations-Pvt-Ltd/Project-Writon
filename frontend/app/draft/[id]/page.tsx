@@ -12,6 +12,48 @@ import GapFillChat from '@/components/draft/GapFillChat';
 
 const indianStates = Object.keys(districtCourtsData).sort();
 
+/**
+ * What the backend reported about an uploaded document's language.
+ * `translation_status` mirrors the STATUS_* constants in core/language.py.
+ */
+type DocTranslation = { language: string; translation_status: string };
+
+const LANGUAGE_NAMES: Record<string, string> = { hi: 'Hindi', mixed: 'Hindi' };
+
+/**
+ * Shown when a Hindi upload was machine-translated to English before it reached
+ * the draft. The advocate has to know, because names and dates are exactly what
+ * a transliteration gets wrong, and they are what a cause title is built from.
+ */
+const TranslationBadge = ({ info }: { info?: DocTranslation }) => {
+  if (!info) return null;
+  const { language, translation_status: status } = info;
+  if (status !== 'translated' && status !== 'partial') return null;
+
+  const name = LANGUAGE_NAMES[language] || 'another language';
+  const partial = status === 'partial';
+
+  return (
+    <div className="mt-1">
+      <span
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider ${
+          partial
+            ? 'bg-[#E4C853]/20 text-[#715000]'
+            : 'bg-primary/10 text-primary'
+        }`}
+      >
+        <span className="material-symbols-outlined text-[12px]">translate</span>
+        {partial ? `${name.toUpperCase()} → EN (PARTIAL)` : `${name.toUpperCase()} → EN`}
+      </span>
+      <p className="text-[11px] text-on-surface-variant mt-1">
+        {partial
+          ? `Part of this document could not be translated. Please review it before filing.`
+          : `Auto-translated from ${name}. Please verify names and dates before filing.`}
+      </p>
+    </div>
+  );
+};
+
 const getDistrictCourtsForState = (state: string) => {
   if (!state) return [];
   return districtCourtsData[state] || [];
@@ -79,6 +121,10 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [grounds, setGrounds] = useState('');
   const [reliefSought, setReliefSought] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<Record<string, string>>({});
+  // Kept separate from uploadedDocs rather than widening it: that map is
+  // compared against 'uploaded'/'uploading'/'unavailable' in ~20 places, and
+  // language is orthogonal to upload state.
+  const [docTranslations, setDocTranslations] = useState<Record<string, DocTranslation>>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // ── Auto-populate from uploaded documents ──────────────────────────────────
@@ -272,6 +318,17 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         setDocStatus(docName, '');
         return;
       }
+      // A Hindi document is translated to English server-side before anything
+      // reads it; the response says whether that happened so the row can be
+      // badged without a second request.
+      const data = await res.json().catch(() => null);
+      if (data?.language) {
+        setDocTranslations(prev => ({
+          ...prev,
+          [docName]: { language: data.language, translation_status: data.translation_status },
+        }));
+      }
+
       setDocStatus(docName, 'uploaded');
       scheduleExtractionWarmup();
     } catch (err) {
@@ -893,8 +950,12 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         setSuggestedJudgments(data.judgments || []);
         setSuggestedStatutes(data.statutes || []);
         
-        // Select all statutes by default, but selectively pre-select judgments based on relevance
-        const jIds = new Set<string>();
+        // Select all statutes by default, but selectively pre-select judgments based on relevance.
+        // Set<number> to match selectedJudgmentIds: retrieval emits a numeric `id`
+        // (see all_results[jid] in core/rag.py) and the checkbox handlers compare
+        // against the same value, so a mismatched element type here would silently
+        // stop every pre-selection from matching.
+        const jIds = new Set<number>();
         (data.judgments || []).forEach((j: any, idx: number) => {
           // Pre-select top 3, or anything with a positive cross-encoder score
           if (idx < 3 || (j.rerank_score !== undefined && j.rerank_score > 0)) {
@@ -1603,6 +1664,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                   <h4 className={`font-bold ${uploadedDocs[doc.document_name] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>{doc.document_name}</h4>
                                 </div>
                                 <p className="text-xs text-on-surface-variant">{doc.description}</p>
+                                <TranslationBadge info={docTranslations[doc.document_name]} />
                               </div>
                               <div className="flex items-center gap-2">
                                 <button 
@@ -1639,6 +1701,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                   <h4 className={`font-bold ${uploadedDocs[doc.document_name] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>{doc.document_name}</h4>
                                 </div>
                                 <p className="text-xs text-on-surface-variant">{doc.description}</p>
+                                <TranslationBadge info={docTranslations[doc.document_name]} />
                               </div>
                               <div className="flex items-center gap-2">
                                 <button 
@@ -1673,6 +1736,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                               <h4 className={`font-bold ${uploadedDocs['Lower Court Judgment'] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>Lower Court Judgment</h4>
                             </div>
                             <p className="text-xs text-on-surface-variant">Upload the lower court's judgment to automatically extract facts and reasoning via OCR for better drafting context.</p>
+                            <TranslationBadge info={docTranslations['Lower Court Judgment']} />
                           </div>
                           <div className="flex items-center gap-2">
                             <button 
@@ -1707,6 +1771,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                   <h4 className={`font-bold ${uploadedDocs[doc.document_name] === 'uploaded' ? 'text-primary' : 'text-on-surface'}`}>{doc.document_name}</h4>
                                 </div>
                                 <p className="text-xs text-on-surface-variant">{doc.description}</p>
+                                <TranslationBadge info={docTranslations[doc.document_name]} />
                               </div>
                               <div className="flex items-center gap-2">
                                 <button 

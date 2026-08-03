@@ -8,7 +8,7 @@ import uuid
 import time
 from app.core.database import get_db, AsyncSessionLocal
 from app.core.r2 import upload_file_to_r2
-from app.core.ocr import extract_text_from_bytes
+from app.core.ocr import extract_and_normalize
 from app.core.verification import verify_document
 from app.core.extraction import extract_fields_from_docs
 from app.core.redis import cache_get, cache_set
@@ -82,14 +82,13 @@ async def upload_document(
             r2_path, 
             file.content_type or "application/octet-stream"
         )
-        ocr_task = asyncio.to_thread(
-            extract_text_from_bytes, 
-            file_bytes, 
-            file.filename
-        )
-        
-        r2_key, ocr_text = await asyncio.gather(r2_task, ocr_task)
-        
+        # OCR followed by Hindi→English translation. Already a coroutine (it
+        # does its own to_thread for the blocking OCR), and it short-circuits
+        # with no API call when the document is already English.
+        ocr_task = extract_and_normalize(file_bytes, file.filename)
+
+        r2_key, ocr = await asyncio.gather(r2_task, ocr_task)
+
         parsed_draft_id = None
         if draft_id and draft_id.isdigit() and int(draft_id) > 0:
             parsed_draft_id = int(draft_id)
@@ -113,24 +112,36 @@ async def upload_document(
         await db.commit()
         await db.refresh(uploaded_doc)
         
-        if ocr_text:
-            ocr_text = ocr_text.replace('\x00', '')
-            
-        verification_result = await verify_document(doc_type, ocr_text)
-        
+        ocr_text = (ocr.text or "").replace('\x00', '')
+        # NULL rather than "" when nothing was translated, so an English upload
+        # costs no extra storage and the column means "there is an original
+        # worth showing the advocate".
+        ocr_original = ((ocr.original or "").replace('\x00', '')) or None
+
+        # Verify against the pre-translation text. gpt-4o-mini classifies Hindi
+        # perfectly well, and this way a translation that failed or was capped
+        # cannot turn into a rejected upload.
+        verification_result = await verify_document(doc_type, ocr_original or ocr_text)
+
         uploaded_doc.ocr_text = ocr_text
+        uploaded_doc.ocr_text_original = ocr_original
+        uploaded_doc.ocr_lang = ocr.language
+        uploaded_doc.translation_status = ocr.status
         uploaded_doc.verify_status = verification_result["status"]
         uploaded_doc.verify_reason = verification_result["reason"]
         await db.commit()
-        
+
         if verification_result["status"] == "rejected":
             raise HTTPException(status_code=400, detail=f"Document Rejected: {verification_result['reason']}")
-        
+
         return {
             "status": "success",
             "message": "File uploaded and verified successfully.",
             "doc_id": uploaded_doc.id,
-            "r2_key": r2_key
+            "r2_key": r2_key,
+            # Lets the wizard badge the document without a second request.
+            "language": ocr.language,
+            "translation_status": ocr.status,
         }
     except HTTPException:
         # Re-raise HTTP exceptions so they retain their status code

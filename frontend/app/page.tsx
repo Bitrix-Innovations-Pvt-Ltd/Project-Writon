@@ -293,7 +293,7 @@ export default function Home() {
               <img alt="Ramesh K. Iyer" className="w-16 h-16 rounded-full border-2 border-outline-variant object-cover shadow-sm" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAdUMEczIvdeAbKbK5JY2uauYphvlIxdq1H40ayE_ezXkJLmwYfEhrxIopgYLiSZD5TMA4ZAVv68gc0ruzgK5iv5qNSEQM_0yZVMEvEI5poxRs8K9sW0PiTto5aTiUvT0UBh_ds8SZw72-0Dl2xAmCwz5jcbMnnzrJj0k77d8BwfT33StUl94n3ddrPJ4dLN-KUI6VwAg8LoQzG3PzwXjYgITp8ZBNsx6AqktDCunKFalFhHmH3qQzGYw"/>
               <div className="text-left">
                 <div className="font-display-lg font-bold text-xl text-on-background">Ramesh K. Iyer</div>
-                <div class="text-sm font-medium text-primary">Senior Advocate, Supreme Court of India</div>
+                <div className="text-sm font-medium text-primary">Senior Advocate, Supreme Court of India</div>
               </div>
             </div>
           </div>

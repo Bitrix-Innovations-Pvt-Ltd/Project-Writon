@@ -17,9 +17,9 @@ openrouter_key = os.getenv("OPENROUTER_API_KEY")
 #
 #   * page.get_text() is local, free and fast — a 200-page digital judgment
 #     extracts in well under a second. Only a high safety bound applies.
-#   * A scanned page costs one gpt-4o-mini vision call. Upload is synchronous
-#     (the advocate waits on the request), so this is the limit that actually
-#     matters for both latency and spend.
+#   * A scanned page costs one vision call (OCR_VISION_MODEL below). Upload is
+#     synchronous (the advocate waits on the request), so this is the limit that
+#     actually matters for both latency and spend.
 #
 # Uploads are capped at 5 MB (api/v1/uploads.py), which bounds the worst case.
 # Downstream prompt budgets live in core/uploaded_docs.py and core/extraction.py,
@@ -27,6 +27,20 @@ openrouter_key = os.getenv("OPENROUTER_API_KEY")
 MAX_PDF_PAGES = int(os.getenv("OCR_MAX_PDF_PAGES", "300"))
 MAX_VISION_PAGES = int(os.getenv("OCR_MAX_VISION_PAGES", "25"))
 VISION_WORKERS = int(os.getenv("OCR_VISION_WORKERS", "8"))
+
+# Gemini 2.5 Flash, not gpt-4o-mini. Uploads are frequently Hindi, and Devanagari
+# is where the two diverge sharply — measured on one rendered Hindi order page:
+#
+#     gpt-4o-mini        4.0s   36,866 in   $0.00561/page   8/10 key fields
+#     gemini-2.5-flash   2.3s    1,830 in   $0.00085/page  10/10 key fields
+#
+# gpt-4o-mini corrupted "प्राथमिकी" to "प्रार्थमिक" and dropped a village name —
+# the kind of proper noun that goes straight into a cause title. It also tiles
+# images into ~20x more input tokens. On *real scans* the gap is wider still:
+# a published Devanagari benchmark (arXiv 2606.29213) scores Gemini 2.5 Flash at
+# 86.3 chrF++ against GPT-5.5 at 58.5, and warns that clean-text benchmarks hide
+# the difference entirely.
+OCR_VISION_MODEL = os.getenv("OCR_VISION_MODEL", "google/gemini-2.5-flash")
 
 # Scanned pages are rendered at this zoom before being sent to the vision model.
 # PyMuPDF's default is 72 DPI, at which scanned Indian court orders are often
@@ -44,12 +58,17 @@ def extract_text_with_llm(file_bytes: bytes, mime_type: str) -> str:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
         base64_image = base64.b64encode(file_bytes).decode('utf-8')
         response = client.chat.completions.create(
-            model="openai/gpt-4o-mini",
+            model=OCR_VISION_MODEL,
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract all readable text from this image exactly as it appears. If there is no text, return empty."},
+                        # "in the original script ... do not translate" matters now
+                        # that OCR runs on a multilingual model and translation is a
+                        # separate stage (core/language.py): asked only to "extract
+                        # text", these models will helpfully hand back English, which
+                        # destroys the Hindi original before it can be stored.
+                        {"type": "text", "text": "Extract all readable text from this image exactly as it appears, in the original script. Do not translate or transliterate. If there is no text, return empty."},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -199,3 +218,22 @@ def extract_text_from_bytes(file_bytes: bytes, filename: str) -> str:
         extracted_text = f"[Extraction Failed. Error: {str(e)}]"
 
     return extracted_text.strip()
+
+
+async def extract_and_normalize(file_bytes: bytes, filename: str):
+    """OCR the file, then translate any Hindi in it to English.
+
+    The entry point the upload path should use. `extract_text_from_bytes` stays
+    as it is — it is the faithful OCR step, and the tests in tests/test_ocr.py
+    exercise it directly.
+
+    Returns a language.TranslationResult. English documents short-circuit inside
+    translate_to_english with no API call, so this costs nothing on the common
+    path.
+    """
+    import asyncio
+
+    from app.core.language import translate_to_english
+
+    raw = await asyncio.to_thread(extract_text_from_bytes, file_bytes, filename)
+    return await translate_to_english(raw)

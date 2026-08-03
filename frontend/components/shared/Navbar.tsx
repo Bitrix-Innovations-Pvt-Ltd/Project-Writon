@@ -58,12 +58,7 @@ export default function Navbar() {
           </Link>
         </SignedOut>
         <SignedIn>
-          <UserButton 
-            afterSignOutUrl="/" 
-            userProfileProps={{
-              apiKeysProps: { hide: true }
-            }}
-          />
+          <UserButton />
         </SignedIn>
       </div>
     </header>

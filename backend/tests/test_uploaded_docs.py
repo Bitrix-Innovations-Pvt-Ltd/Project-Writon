@@ -172,3 +172,62 @@ def test_min_doc_chars_boundary():
     block, used = build_uploaded_docs_context(
         [_doc(1, "x" * (MIN_DOC_CHARS + 1), unique=False)])
     assert len(used) == 1
+
+
+# ── Translated documents ─────────────────────────────────────────────────────
+# A Hindi upload is translated at OCR time (core/language.py) and `ocr_text`
+# holds the English. The model has to be told, or it will quote a machine
+# translation as if it were the verbatim record.
+
+def _translated(i, status="translated", ocr_lang="hi"):
+    doc = _doc(i, "x" * 500, doc_type="Impugned Order", filename="order.pdf")
+    doc["translation_status"] = status
+    doc["ocr_lang"] = ocr_lang
+    return doc
+
+
+def _doc_headers(block):
+    """The '=== DOCUMENT n: ... ===' lines only.
+
+    The block header explains what the annotation means, so it contains the
+    phrase too — a bare `in block` check would match that and pass vacuously.
+    """
+    return [ln for ln in block.splitlines() if ln.startswith("=== DOCUMENT ")]
+
+
+def test_translated_document_is_annotated():
+    block, _ = build_uploaded_docs_context([_translated(1)])
+    assert _doc_headers(block) == [
+        '=== DOCUMENT 1: "Impugned Order" (file: order.pdf) [translated from Hindi] ==='
+    ]
+
+
+def test_partial_translation_says_so():
+    block, _ = build_uploaded_docs_context([_translated(1, status="partial")])
+    assert "[translated from Hindi in part]" in _doc_headers(block)[0]
+
+
+@pytest.mark.parametrize("status", ["not_needed", "disabled", "failed", "", None])
+def test_untranslated_document_is_not_annotated(status):
+    """These all mean the text is the original, so there is nothing to disclose."""
+    block, _ = build_uploaded_docs_context([_translated(1, status=status)])
+    assert "[translated from" not in _doc_headers(block)[0]
+
+
+def test_legacy_rows_without_the_columns_are_not_annotated():
+    """Rows predating the migration have neither key."""
+    block, _ = build_uploaded_docs_context([_doc(1, "x" * 500)])
+    assert "[translated from" not in _doc_headers(block)[0]
+
+
+def test_header_warns_against_quoting_a_translation():
+    block, _ = build_uploaded_docs_context([_translated(1)])
+    assert "verbatim quotation" in block
+
+
+def test_annotation_does_not_disturb_the_label():
+    """unique_labels() and the ANNEXURES list key off the quoted label, which
+    has to stay exactly what it was before the annotation was appended."""
+    block, used = build_uploaded_docs_context([_translated(1)])
+    assert used[0]["label"] == "Impugned Order"
+    assert _doc_headers(block)[0].startswith('=== DOCUMENT 1: "Impugned Order" (file: order.pdf)')

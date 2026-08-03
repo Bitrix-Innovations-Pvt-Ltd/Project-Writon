@@ -64,7 +64,26 @@ _HEADER = (
     "this matter: rely on them for names, dates, figures and events, and prefer "
     "them over inference. Each document is delimited and labelled. In the "
     "ANNEXURES section, list exactly these documents by their label — no others.\n"
+    "A document marked [translated from ...] is a machine translation of a "
+    "non-English original. Rely on it for the facts, but do NOT present any "
+    "sentence from it as a verbatim quotation of the record — describe its "
+    "contents instead.\n"
 )
+
+# Translation states worth telling the drafting model about. 'not_needed' and
+# 'disabled' mean the text is the original, so they carry no annotation.
+_TRANSLATED_STATES = {"translated", "partial"}
+
+_LANG_NAMES = {"hi": "Hindi", "mixed": "Hindi"}
+
+
+def _translation_note(doc: dict) -> str:
+    """" [translated from Hindi]" for a document that went through translation."""
+    if (doc.get("translation_status") or "") not in _TRANSLATED_STATES:
+        return ""
+    language = _LANG_NAMES.get(doc.get("ocr_lang") or "", "another language")
+    partly = " in part" if doc.get("translation_status") == "partial" else ""
+    return f" [translated from {language}{partly}]"
 
 
 async def fetch_uploaded_docs(
@@ -90,7 +109,8 @@ async def fetch_uploaded_docs(
 
     res = await conn.execute(
         sql_text("""
-            SELECT id, doc_type, original_filename, ocr_text
+            SELECT id, doc_type, original_filename, ocr_text,
+                   ocr_lang, translation_status
               FROM uploaded_docs
              -- Both sides are NULL-safe: `col = NULL` yields NULL, never true,
              -- so an absent parameter simply contributes no matches. The casts
@@ -170,7 +190,8 @@ def build_uploaded_docs_context(docs: list[dict]) -> tuple[str, list[dict]]:
         label = labels[i - 1]
         filename = (doc.get("original_filename") or "unknown").strip()
         blocks.append(
-            f'=== DOCUMENT {i}: "{label}" (file: {filename}) ===\n'
+            f'=== DOCUMENT {i}: "{label}" (file: {filename})'
+            f"{_translation_note(doc)} ===\n"
             f"{body}\n"
             f"=== END DOCUMENT {i} ==="
         )

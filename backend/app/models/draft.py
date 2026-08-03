@@ -47,7 +47,15 @@ class UploadedDoc(Base):
     original_filename = Column(String)
     r2_key = Column(String)
     doc_type = Column(String)
+    # English-facing text: a Hindi upload is translated at OCR time, so every
+    # consumer of this column reads English. See app/core/language.py.
     ocr_text = Column(String)
+    # 'en' | 'hi' | 'mixed' | 'unknown'. NULL on rows predating the layer.
+    ocr_lang = Column(String(16))
+    # Pre-translation text, kept for audit. NULL unless a translation happened.
+    ocr_text_original = Column(String)
+    # 'not_needed' | 'translated' | 'partial' | 'failed' | 'disabled'
+    translation_status = Column(String(16))
     verify_status = Column(String)
     verify_reason = Column(String)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
