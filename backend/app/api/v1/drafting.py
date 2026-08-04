@@ -73,6 +73,11 @@ class GenerateRequest(BaseModel):
     mandatory_paragraphs: str = ""
     advocate_name: str = ""
     advocate_enrollment_no: str = ""
+    # Trailing particulars of the advocate signature block. Which of these are
+    # printed, and under what label, is decided by the court profile's
+    # signature_lines (Allahabad prints Reg. No. / On Roll No. / Mobile No.).
+    advocate_on_roll_no: str = ""
+    advocate_mobile_no: str = ""
     petitioners: list = []
     respondents: list = []
     jurisdiction_basis: str = ""

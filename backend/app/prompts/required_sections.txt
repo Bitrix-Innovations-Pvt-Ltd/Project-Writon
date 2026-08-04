@@ -1,0 +1,17 @@
+REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
+{% for s in required_sections %}{{ loop.index }}. {{ s }}
+{% endfor %}
+Write EVERY section in the list above and write NO section that is not in it. The list is decided by this court's practice and by what the advocate actually asked for, so a section that is absent here does not belong in this paper book.
+
+INDEX CONTENTS: the COVER_AND_INDEX section must contain a three-column markdown table with the headings `Sl.No. | PARTICULARS | PAGE NOS.`, listing — in this order — every section that follows it, then each annexure as its own row, then the Affidavit, then the identity proof of the deponent{% if profile.drafts_vakalatnama %}, then the Vakalatnama{% else %}, then the Vakalatnama (filed as a separate stamped form and therefore listed here but NOT drafted in this paper book){% endif %}. Annexure rows carry the annexure label and a short description with its date. Put "Separate" in the PAGE NOS. cell for documents that are paginated separately (Dates & Events{% if has_interim_relief %}, the Application for Interim Relief{% endif %}) and leave the other page cells blank for the filing clerk.
+{% if has_interim_relief %}
+INTERIM RELIEF APPLICATION — HOW TO WRITE IT: this section is a STANDALONE application bundled with the petition, not a paragraph inside it. It must contain, in this order (these are the PARTS OF THAT ONE SECTION, not additional sections):
+  (i)   The court heading, then "C. M. Application No. ______ OF {{ current_year }}", then "IN RE:", then the writ petition number line — each centred.
+  (ii)  The FULL long-form cause title: every petitioner and every {{ profile.respondent_label_singular | lower }} as a numbered list with complete particulars and addresses, using the SAME numbering as the main body.
+  (iii) A centred, bold, underlined heading: APPLICATION FOR INTERIM RELIEF
+  (iv)  The opening: "For the facts, reasons and circumstances as stated in the accompanying writ petition duly supported by an affidavit, it is most respectfully prayed that this Hon'ble Court may graciously be pleased to issue…" followed by the interim relief sought, reproduced in full from the INTERIM RELIEF field and phrased as an operative direction that names the {{ profile.respondent_label | lower }} by their numbers.
+  (v)   A closing clause for any other order the Court may deem fit and proper.
+  (vi)  The advocate signature block.
+Do NOT also fold the interim relief into the main PRAYER section — it belongs here, and repeating it in the prayer is a drafting error.
+{% endif %}
+⚠️ FINAL REMINDER BEFORE DRAFTING: Every paragraph in the main body MUST start with its sequential number (1. 2. 3. …). No paragraph may appear without a number. Grounds use A. B. C. — not numbers. Prayer sub-clauses use (A) (B) (C). Section titles are centred. The opposing side is called "{{ profile.respondent_label }}". Begin drafting now.

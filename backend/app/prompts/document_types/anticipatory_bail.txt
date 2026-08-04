@@ -70,12 +70,4 @@ SPECIFIC DRAFTING INSTRUCTIONS (Anticipatory Bail — Section 438 CrPC / Section
 5. If FIR has been registered, attach copy (via OCR-extracted text if uploaded).
 6. Number every paragraph consecutively.
 
-REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
-1. COVER_AND_INDEX
-2. MAIN_APPLICATION
-3. PRAYER
-4. AFFIDAVIT
-5. VAKALATNAMA
-6. ANNEXURES
-
-⚠️ FINAL REMINDER BEFORE DRAFTING: Every paragraph in MAIN_APPLICATION MUST start with its sequential number (1. 2. 3. …). No paragraph may appear without a number. Grounds use A. B. C. — not numbers. Begin drafting now.
+{% include "required_sections.txt" %}

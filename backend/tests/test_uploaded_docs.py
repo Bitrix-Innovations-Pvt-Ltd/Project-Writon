@@ -231,3 +231,40 @@ def test_annotation_does_not_disturb_the_label():
     block, used = build_uploaded_docs_context([_translated(1)])
     assert used[0]["label"] == "Impugned Order"
     assert _doc_headers(block)[0].startswith('=== DOCUMENT 1: "Impugned Order" (file: order.pdf)')
+
+
+# ── Upload-session isolation ─────────────────────────────────────────────────
+# The session id is stored client-side under a key containing params.id, which
+# is the literal "new" for every new draft. Two drafts created in one browser
+# tab therefore share a session id. The SQL must not let the second draft see
+# the first draft's documents: once uploads are back-linked to a draft they
+# belong to that draft alone.
+
+def _sql_of(fn):
+    import inspect
+    return inspect.getsource(fn)
+
+
+def test_session_branch_requires_unclaimed_documents():
+    """Guards the leak directly: the session-id branch must be constrained to
+    rows whose draft_id IS NULL."""
+    from app.core.uploaded_docs import fetch_uploaded_docs
+
+    sql = _sql_of(fetch_uploaded_docs)
+    # The session predicate and the NULL guard must appear together.
+    assert "upload_session_id = CAST(:sid AS TEXT)" in sql
+    session_clause_start = sql.index("upload_session_id = CAST(:sid AS TEXT)")
+    tail = sql[session_clause_start:session_clause_start + 200]
+    assert "draft_id IS NULL" in tail, (
+        "the upload_session_id branch must require draft_id IS NULL, or a new "
+        "draft in the same browser tab inherits the previous draft's uploads"
+    )
+
+
+def test_extract_fields_session_branch_also_guarded():
+    """The same leak existed in the auto-populate query."""
+    import inspect
+    from app.api.v1 import uploads
+
+    sql = inspect.getsource(uploads.extract_fields)
+    assert "upload_session_id = :sid AND draft_id IS NULL" in sql

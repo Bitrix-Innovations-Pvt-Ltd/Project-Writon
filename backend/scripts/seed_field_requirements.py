@@ -71,7 +71,34 @@ FIELD_REQUIREMENTS = [
     ("criminal_appeal", "grounds",                "Grounds of Appeal",            "required", 30, "Legal errors in the trial/lower court's judgment.",                    4),
     ("criminal_appeal", "relief_sought",          "Relief Sought",                "required", 10, "What the appellant wants the appellate court to order.",               5),
     ("criminal_appeal", "advocate_name",          "Advocate Name",                "required", 3,  "Required for the counsel block.",                                      6),
+    # ── Fields the auto-populate step fills, which the bot must also be able
+    #    to ask for when the uploaded documents do not yield them ────────────
+    #
+    # jurisdiction_basis is ONE field with a different meaning per document
+    # type — see the CASE DETAILS block of app/prompts/document_types/*.txt and
+    # _JURISDICTION_SPECS in app/core/extraction.py. The label here is what the
+    # bot actually asks, so it has to match the meaning, not the column name.
+    # Keep the three in sync.
+    ("bail_application",       "jurisdiction_basis",  "Crime Number / FIR No.",         "high_value", 5, "The FIR the applicant seeks bail in; it heads the cause title.",       7),
+    ("anticipatory_bail",      "jurisdiction_basis",  "FIR / Case Reference",           "high_value", 5, "The FIR in which arrest is apprehended.",                              7),
+    ("civil_appeal",           "jurisdiction_basis",  "Court Below",                    "high_value", 5, "Names the court whose decree is under appeal.",                        8),
+    ("criminal_appeal",        "jurisdiction_basis",  "Trial Court / Sessions Court",   "high_value", 5, "Names the court whose judgment is under appeal.",                      7),
+    ("writ_petition_criminal", "jurisdiction_basis",  "Jurisdiction Basis",             "high_value", 10, "Explains why this court has authority to hear the matter.",           8),
+
+    # Needed for the prayer clause and for limitation. Already present for the
+    # writ and civil-appeal types; these three were missing.
+    ("bail_application",       "impugned_order_date", "Date of Order Rejecting Bail",   "high_value", 5, "The order being challenged; also fixes the limitation period.",        8),
+    ("anticipatory_bail",      "impugned_order_date", "Date of Order Rejecting Bail",   "high_value", 5, "The order being challenged; also fixes the limitation period.",        8),
+    ("criminal_appeal",        "impugned_order_date", "Date of Impugned Judgment",      "high_value", 5, "Critical for calculating the limitation period.",                      8),
 ]
+
+# NOTE — dates_and_events is deliberately NOT listed here.
+# The bot writes an answer into form_data as a plain string, but this field is a
+# list of {date, event} dicts that the templates iterate:
+#     {% for de in form_data.dates_and_events %}| {{ de.date }} | {{ de.event }} |
+# A string would be iterated character by character and produce one garbage row
+# per character in the LIST_OF_DATES table. Collecting it needs a structured
+# answer type in the gapfill flow, not a row here.
 
 
 async def seed():

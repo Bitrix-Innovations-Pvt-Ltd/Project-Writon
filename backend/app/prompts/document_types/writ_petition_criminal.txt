@@ -72,14 +72,4 @@ SPECIFIC DRAFTING INSTRUCTIONS (Criminal Writ):
 4. Do NOT create section headings like "Jurisdiction:" — it is a plain paragraph.
 5. Number every paragraph in the main body consecutively.
 
-REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
-1. COVER_AND_INDEX
-2. SYNOPSIS
-3. LIST_OF_DATES
-4. MAIN_PETITION
-5. PRAYER
-6. AFFIDAVIT
-7. VAKALATNAMA
-8. ANNEXURES
-
-⚠️ FINAL REMINDER BEFORE DRAFTING: Every paragraph in SYNOPSIS and MAIN_PETITION MUST start with its sequential number (1. 2. 3. …). No paragraph may appear without a number. Grounds use A. B. C. — not numbers. Begin drafting now.
+{% include "required_sections.txt" %}

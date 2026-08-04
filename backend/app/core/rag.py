@@ -135,6 +135,57 @@ def _derive_case_type_filter(config: dict, document_type_key: str, subject_matte
     return base
 
 
+# Subject matter -> the statute domain that actually governs it.
+#
+# Why this exists: 'civil' is tagged on 48 of 58 legal_codes, so a domain filter
+# of ['civil','constitutional'] admits 49 codes — effectively no filter at all.
+# A U.P. land-revenue writ was therefore ranked against Income Tax, IBC and the
+# Contract Act purely on embedding similarity. 'criminal' by contrast admits 16
+# codes and works well, which is why criminal matters retrieve far better.
+#
+# Matched against the subject-matter NAME only; nothing in the subject_matters,
+# document_types or sub-subject-matter tables is read differently or modified.
+# Ordered — the first match wins, so put the narrower signals first.
+_SUBJECT_STATUTE_DOMAINS: tuple = (
+    # Tax first: "Writ Tax — Stamp duty & registration fee" is a tax matter even
+    # though it mentions registration.
+    ("tax", ("writ tax", "income tax", " gst", "vat", "trade tax", "excise",
+             "customs", "wealth tax", "gift tax", "estate duty", "sales tax",
+             "tax (direct", "goods & service tax")),
+    ("service", ("service matters", "service law", "service (central",
+                 "departmental enquiry", "compassionate appointment", "seniority",
+                 "promotion", "retiral", "pension", "probation & confirmation",
+                 "compulsory retirement", "voluntary retirement")),
+    ("property", ("revenue, land", "zamindari", "bhumidhari", "sirdari",
+                  "consolidation", "mutation", "land revenue", "gaon sabha",
+                  "ceiling on land", "patta", "land acquisition", "property",
+                  "rent control", "eviction", "tenancy", "real estate",
+                  "builder dispute", "rera", "stamp act")),
+    ("family", ("matrimonial", "family", "probate", "testamentary", "guardian",
+                "custody of minor", "succession")),
+    ("corporate", ("company", "insolvency", "sarfaesi", "debt recovery",
+                   "commercial", "arbitration", "amalgamation", "liquidator",
+                   "money recovery")),
+    ("labour", ("industrial dispute", "labour", "wages", "industrial disputes act")),
+    ("transport", ("motor accident", "mact", "motor vehicles")),
+    ("environment", ("environmental", "environment")),
+    ("consumer", ("consumer",)),
+)
+
+# Kept alongside the narrowed domain so general civil machinery stays reachable:
+# 'procedure' brings CPC and the Limitation Act, 'constitutional' brings the COI
+# that every writ is founded on.
+_NARROWED_COMPANION_DOMAINS = ("constitutional", "procedure")
+
+
+def _subject_statute_domain(sm_lower: str) -> str:
+    """The governing statute domain for this subject matter, or '' if unclear."""
+    for domain, keywords in _SUBJECT_STATUTE_DOMAINS:
+        if any(kw in sm_lower for kw in keywords):
+            return domain
+    return ""
+
+
 def _derive_statute_domains(config: dict, document_type_key: str, subject_matter: str = "") -> list:
     """Return preferred statute domains for this document type and subject matter."""
     domains = list((config.get("doc_type_domains") or {}).get(document_type_key, []))
@@ -147,6 +198,16 @@ def _derive_statute_domains(config: dict, document_type_key: str, subject_matter
 
     if "constitutional" not in domains and (needs_coi or is_service):
         domains.append("constitutional")
+
+    # Replace the catch-all 'civil' with the domain the subject actually belongs
+    # to. Only fires when 'civil' is present, so criminal document types — which
+    # already filter well at 16/58 codes — are left untouched.
+    specific = _subject_statute_domain(sm_lower)
+    if specific and "civil" in domains:
+        domains = [d for d in domains if d != "civil"]
+        for extra in (specific,) + _NARROWED_COMPANION_DOMAINS:
+            if extra not in domains:
+                domains.append(extra)
 
     return domains
 
@@ -283,8 +344,13 @@ def _looks_like_case_name(query: str) -> bool:
 # cost ~47s; only distinctive names may widen the search.
 _PROPER_NOUN_RE = re.compile(r"\b[A-Z][A-Za-z'&.\-]{2,}\b")
 MAX_OR_TERMS = int(os.getenv("RAG_MAX_OR_TERMS", "6"))
-# Hard ceiling so a pathological keyword query can never eat the request budget
-OR_FALLBACK_TIMEOUT_MS = int(os.getenv("RAG_OR_FALLBACK_TIMEOUT_MS", "4000"))
+# Hard ceiling so a pathological keyword query can never eat the request budget.
+# 4000 was sized for the old search_vector form, which took ~50s and therefore
+# always tripped the cap — the fallback silently contributed nothing. The
+# two-stage party-column query (see build_case_name_fallback_sql) costs ~1.2s
+# warm and up to ~4s cold on a broad government cause title, so 4000 still cut
+# off the cold path. 6000 clears it while keeping the query bounded.
+OR_FALLBACK_TIMEOUT_MS = int(os.getenv("RAG_OR_FALLBACK_TIMEOUT_MS", "6000"))
 
 
 def _case_name_terms(query: str, stopwords: set) -> list:
@@ -297,6 +363,69 @@ def _case_name_terms(query: str, stopwords: set) -> list:
         seen.add(key)
         terms.append(tok)
     return terms[:MAX_OR_TERMS]
+
+
+def build_case_name_fallback_sql(
+    words: list, ts_config: str = "english", ct_filter_sql: str = ""
+) -> tuple:
+    """Build the case-name OR-fallback query. Returns (sql, params).
+
+    Party names are matched against the PARTY COLUMNS, never against
+    search_vector. search_vector spans summary + holding + full_text, so a name
+    matched there whenever a judgment merely *mentioned* someone of that name.
+    Measured on the live corpus (39,506 judgments):
+
+        search_vector @@ 'Kumar | Verma'   20,698 rows (52.4%)  5.43s
+        petitioner/respondent ILIKE         3,015 rows ( 7.6%)  0.13s warm
+
+    At 5.43s the old form could not finish inside OR_FALLBACK_TIMEOUT_MS (4s), so
+    it always ended in QueryCanceledError for common Indian surnames — Kumar
+    appears in 49% of the corpus, Singh 59%, Sharma 30% — which is the majority
+    of Indian cause titles. The stopword list catches generic legal vocabulary
+    ("State", "bail") but can never keep up with surnames.
+
+    Filtering on the party columns is also what this fallback *means*: it exists
+    to find a case by its cause title. ts_rank still orders the survivors, so
+    relevance ranking is unchanged — it just runs over 3k rows instead of 21k.
+    """
+    name_filter = " OR ".join(
+        f"(j.petitioner ILIKE :nm{i} OR j.respondent ILIKE :nm{i})"
+        for i in range(len(words))
+    )
+    params = {"or_q": " | ".join(words)}
+    params.update({f"nm{i}": f"%{w}%" for i, w in enumerate(words)})
+    # Two stages: rank a lean row first, then fetch the heavy text for the 20
+    # winners only. Building chunk_text in the ranking pass meant detoasting
+    # full_text for every matching row — measured on a government cause title
+    # ("... Chief Engineer, Lucknow Zone", 3,606 matches):
+    #
+    #     name filter alone                    0.65s
+    #     + ts_rank + ORDER BY + LIMIT         3.87s
+    #     + SUBSTRING(full_text) in that pass  4.96s   -> over the 4s cap
+    #     two-stage (this form)                3.28s cold / 1.41s warm
+    #
+    # Same columns and ordering as before; only the point at which full_text is
+    # read has moved.
+    sql = f"""
+        WITH hits AS (
+            SELECT j.id,
+                   ts_rank(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
+              FROM judgments j
+             WHERE ({name_filter})
+             {ct_filter_sql}
+             ORDER BY rank_score DESC
+             LIMIT 20
+        )
+        SELECT j.id,
+               j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
+               COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
+                   || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
+               h.rank_score
+          FROM hits h
+          JOIN judgments j ON j.id = h.id
+         ORDER BY h.rank_score DESC
+    """
+    return sql, params
 
 # Number of rewritten queries to fan out (5-7). Benchmarked 2026-07-25
 # (scripts/evaluate_step6.py): 5 beat 7 on BOTH precision and latency —
@@ -542,24 +671,17 @@ async def retrieve_judgment_chunks(
                 stopwords = set(cfg["config"].get("case_name_stopwords") or [])
                 words = _case_name_terms(query, stopwords)
                 if len(words) > 1:
-                    or_query = " | ".join(words)
-                    fallback_sql = f"""
-                        SELECT j.id,
-                               j.case_number, j.petitioner, j.respondent, j.year, j.case_type,
-                               COALESCE(j.summary, '') || ' ' || COALESCE(j.holding, '') || ' '
-                                   || SUBSTRING(j.full_text, 1, 1500) AS chunk_text,
-                               ts_rank(j.search_vector, to_tsquery('{ts_config}', :or_q)) AS rank_score
-                        FROM   judgments j
-                        WHERE  j.search_vector @@ to_tsquery('{ts_config}', :or_q)
-                        {ct_filter_sql}
-                        ORDER  BY rank_score DESC
-                        LIMIT  20
-                    """
+                    # See build_case_name_fallback_sql: party names are matched
+                    # against the party columns, never against search_vector.
+                    fallback_sql, fallback_params = build_case_name_fallback_sql(
+                        words, ts_config, ct_filter_sql
+                    )
                     try:
                         # Timeout-capped: the fallback is a nice-to-have rescue,
                         # never a reason to blow the request's latency budget.
                         kw_rows = await _exec_raw(
-                            engine, fallback_sql, {"or_q": or_query, **params_shared},
+                            engine, fallback_sql,
+                            {**fallback_params, **params_shared},
                             presql=f"SET LOCAL statement_timeout = {OR_FALLBACK_TIMEOUT_MS}",
                         )
                     except Exception as fallback_err:
@@ -1491,10 +1613,30 @@ def assemble_prompt(
     # Bug 2 fix: compute has_uploads so templates can guard the ANNEXURES section.
     has_uploads = bool(uploaded_docs_context and uploaded_docs_context.strip())
 
+    # Per-court drafting conventions ("Opposite Parties" vs "Respondents", whether
+    # a synopsis belongs in the paper book, the affidavit tail, the section
+    # order). Unknown courts get the default profile, which is the behaviour that
+    # existed before core/court_profile.py.
+    from app.core.court_profile import (
+        court_profile,
+        has_interim_relief,
+        required_sections,
+    )
+
+    profile = court_profile(
+        court_level=form_data.get("court_level", ""),
+        court_display=court_display,
+        document_type_key=doc_type_key,
+    )
+    wants_interim = has_interim_relief(form_data)
+
     context = {
         "current_year":        datetime.now().year,
         "doc_type":            doc_type,
         "court_display":       court_display,
+        "profile":             profile,
+        "has_interim_relief":  wants_interim,
+        "required_sections":   required_sections(profile, doc_type_key, wants_interim),
         "jurisdiction_warning": jurisdiction_warning,
         "petitioners":         petitioners,
         "respondents":         respondents,

@@ -131,18 +131,37 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   // Uploads happen at Step 4, before the draft row exists, so a client-generated
   // session id is what groups them. Backed by sessionStorage so it survives an
   // accidental refresh mid-wizard; a ref so reading it never triggers a render.
+  const uploadSessionStorageKey = `writon:upload_session:${params?.id ?? 'new'}`;
+  const newUploadSessionId = () =>
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+
   const uploadSessionIdRef = useRef<string>('');
   if (!uploadSessionIdRef.current && typeof window !== 'undefined') {
-    const key = `writon:upload_session:${params?.id ?? 'new'}`;
-    let sid = window.sessionStorage.getItem(key);
+    let sid = window.sessionStorage.getItem(uploadSessionStorageKey);
     if (!sid) {
-      sid = typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-      window.sessionStorage.setItem(key, sid);
+      sid = newUploadSessionId();
+      window.sessionStorage.setItem(uploadSessionStorageKey, sid);
     }
     uploadSessionIdRef.current = sid;
   }
+
+  /**
+   * Start a fresh upload session once this draft has claimed its documents.
+   *
+   * The storage key contains params.id, which is the literal "new" for every
+   * new draft — so without rotating, a second draft started in the same tab
+   * reused the id and inherited the first draft's uploads. The server also
+   * guards this (the session branch requires draft_id IS NULL), but rotating
+   * keeps the client honest for uploads made before a draft row exists.
+   */
+  const rotateUploadSession = () => {
+    if (typeof window === 'undefined') return;
+    const sid = newUploadSessionId();
+    window.sessionStorage.setItem(uploadSessionStorageKey, sid);
+    uploadSessionIdRef.current = sid;
+  };
 
   type AiSuggestion = { value: any; confidence: number; sourceDoc?: string; reason?: string };
   const extractionPromiseRef = useRef<Promise<any> | null>(null);
@@ -166,7 +185,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [suggestedStatutes, setSuggestedStatutes] = useState<any[]>([]);
   const [selectedJudgmentIds, setSelectedJudgmentIds] = useState<Set<number>>(new Set());
   const [selectedStatuteIds, setSelectedStatuteIds] = useState<Set<number>>(new Set());
-  const [isLoadingCitations, setIsLoadingCitations] = useState(false); 
+  const [isLoadingCitations, setIsLoadingCitations] = useState(false);
+  // Explains an empty precedent pre-selection (see fetchCitations).
+  const [citationNotice, setCitationNotice] = useState<string | null>(null);
   
   // New Hierarchy States
   const [selectedCategory, setSelectedCategory] = useState<any>(null);
@@ -184,6 +205,11 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   // Step 5: Parties & Facts State
   const [advocateName, setAdvocateName] = useState('');
   const [advocateEnrollmentNo, setAdvocateEnrollmentNo] = useState('');
+  // Printed in the advocate signature block. The court profile decides the
+  // labels — Allahabad prints "Reg. No. / On Roll No. / Mobile No."
+  // (see signature_lines in backend/app/core/court_profile.py).
+  const [advocateOnRollNo, setAdvocateOnRollNo] = useState('');
+  const [advocateMobileNo, setAdvocateMobileNo] = useState('');
   const [petitioners, setPetitioners] = useState<string[]>(['']);
   const [respondents, setRespondents] = useState<string[]>(['']);
   const [impugnedOrderDate, setImpugnedOrderDate] = useState('');
@@ -874,6 +900,17 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
    * _JURISDICTION_SPECS in backend/app/core/extraction.py and the CASE DETAILS
    * block of app/prompts/document_types/*.txt — keep the three in sync.
    */
+  /**
+   * Allahabad (incl. the Lucknow bench) prints Reg. No. / On Roll No. / Mobile
+   * No. in the advocate signature block; other courts print a single Enrollment
+   * No. Kept in step with _ALLAHABAD_MARKERS in backend/app/core/court_profile.py.
+   */
+  // Must stay in step with court_profile() in backend/app/core/court_profile.py:
+  // High Court level only. A district court renders as "Lucknow District Court,
+  // Uttar Pradesh" and a tribunal as "Lucknow Bench, ..." — both match the city
+  // name but neither files an Allahabad High Court paper book.
+  const isAllahabad = courtLevel === 'high' && /allahabad|lucknow/i.test(getCourtDisplay());
+
   const jurisdictionFieldSpec = (docTypeKey: string) => {
     switch (docTypeKey) {
       case 'bail_application':
@@ -896,6 +933,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
 
   const fetchCitations = async () => {
     setIsLoadingCitations(true);
+    setCitationNotice(null);   // clear any notice from a previous attempt
     setSuggestedJudgments([]);
     setSuggestedStatutes([]);
     
@@ -921,6 +959,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       mandatory_paragraphs: mandatoryParagraphs,
       advocate_name: advocateName,
       advocate_enrollment_no: advocateEnrollmentNo,
+      advocate_on_roll_no: advocateOnRollNo,
+      advocate_mobile_no: advocateMobileNo,
       petitioners: petitioners.filter(p => p.trim()),
       respondents: respondents.filter(r => r.trim()),
       jurisdiction_basis: jurisdictionBasis,
@@ -955,22 +995,50 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         // (see all_results[jid] in core/rag.py) and the checkbox handlers compare
         // against the same value, so a mismatched element type here would silently
         // stop every pre-selection from matching.
+        // Pre-select only what the reranker actually rates. The old rule also
+        // took `idx < 3`, which auto-checked the top three whatever their score
+        // — including ones this same UI labels "Low Relevance" (score <= 0).
+        // base_rules.txt then instructs the model to cite every selected
+        // authority ("MANDATORY USE ... weave its ratio decidendi into the
+        // relevant ground"), so an irrelevant precedent did not merely sit
+        // unused, it was forced into the draft. That hit civil matters hardest,
+        // where scores are routinely <= 0.
+        //
+        // Selecting nothing is the better failure: base_rules handles an empty
+        // precedents block explicitly, whereas a wrong precedent in a filed
+        // pleading is the kind of error a judge notices.
         const jIds = new Set<number>();
-        (data.judgments || []).forEach((j: any, idx: number) => {
-          // Pre-select top 3, or anything with a positive cross-encoder score
-          if (idx < 3 || (j.rerank_score !== undefined && j.rerank_score > 0)) {
+        (data.judgments || []).forEach((j: any) => {
+          if (typeof j.rerank_score === 'number' && j.rerank_score > 0) {
             jIds.add(j.id);
           }
         });
         setSelectedJudgmentIds(jIds);
+        // Tell the advocate why nothing is ticked, so an empty selection reads
+        // as a considered result rather than a broken step.
+        setCitationNotice(
+          (data.judgments || []).length > 0 && jIds.size === 0
+            ? 'None of the retrieved precedents scored as relevant to this matter, so none are pre-selected. Review them and tick any you want cited — or continue without precedents.'
+            : null
+        );
         setSelectedStatuteIds(new Set((data.statutes || []).map((s: any) => s.id)));
       } else {
         console.error("Failed to fetch citations:", await res.text());
-        alert("Failed to fetch citations from the server.");
+        // A dismissable alert left the step looking merely empty, so the draft
+        // was then generated with no authorities — which on the server falls
+        // back to a full retrieval pass and takes far longer. A persistent
+        // notice keeps the failure visible next to the Refresh button.
+        setCitationNotice(
+          'Could not load citations from the server. Press Refresh to try again — ' +
+          'generating now would run a slower retrieval pass instead.'
+        );
       }
     } catch (err) {
       console.error(err);
-      alert("Network error while fetching citations.");
+      setCitationNotice(
+        'Citations could not be loaded (the request failed or was interrupted). ' +
+        'Press Refresh to try again — generating now would run a slower retrieval pass instead.'
+      );
     } finally {
       setIsLoadingCitations(false);
     }
@@ -1010,6 +1078,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       mandatory_paragraphs: mandatoryParagraphs,
       advocate_name: advocateName,
       advocate_enrollment_no: advocateEnrollmentNo,
+      advocate_on_roll_no: advocateOnRollNo,
+      advocate_mobile_no: advocateMobileNo,
       petitioners: petitioners.filter(p => p.trim()),
       respondents: respondents.filter(r => r.trim()),
       jurisdiction_basis: jurisdictionBasis,
@@ -1978,9 +2048,29 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                     <input type="text" value={advocateName} onChange={(e) => setAdvocateName(e.target.value)} placeholder="Advocate on Record" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
                   </div>
                   <div>
-                    <label className="block text-xs font-bold text-on-surface-variant mb-1">Enrollment Number</label>
+                    <label className="block text-xs font-bold text-on-surface-variant mb-1">
+                      {isAllahabad ? 'Reg. No.' : 'Enrollment Number'}
+                    </label>
                     <input type="text" value={advocateEnrollmentNo} onChange={(e) => setAdvocateEnrollmentNo(e.target.value)} placeholder="e.g. D/1234/2023" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
                   </div>
+                  {/* Allahabad prints Reg. No. / On Roll No. / Mobile No. in the
+                      signature block; other courts print only Enrollment No.
+                      Mirrors signature_lines in backend/app/core/court_profile.py. */}
+                  {isAllahabad && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-bold text-on-surface-variant mb-1">On Roll No.</label>
+                        <input type="text" value={advocateOnRollNo} onChange={(e) => setAdvocateOnRollNo(e.target.value)} placeholder="e.g. 12345" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-on-surface-variant mb-1">Mobile No.</label>
+                        <input type="tel" inputMode="numeric" value={advocateMobileNo} onChange={(e) => setAdvocateMobileNo(e.target.value)} placeholder="e.g. 98765 43210" className="w-full p-3 rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm transition-all bg-white" />
+                      </div>
+                      <p className="col-span-full text-xs text-on-surface-variant -mt-1">
+                        These print in the signature block on every page. Leave blank to keep a fill-in line.
+                      </p>
+                    </>
+                  )}
                 </div>
 
                 {/* Petitioners */}
@@ -2164,6 +2254,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   relief_sought: reliefSought,
                   advocate_name: advocateName,
                   advocate_enrollment_no: advocateEnrollmentNo,
+                  advocate_on_roll_no: advocateOnRollNo,
+                  advocate_mobile_no: advocateMobileNo,
                   petitioners: petitioners,
                   respondents: respondents,
                   impugned_order_date: impugnedOrderDate ? new Date(impugnedOrderDate).toISOString() : null,
@@ -2174,7 +2266,12 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                 }}
                 onComplete={(summary, updatedFormData, newDraftId) => {
                   setGapFillSummary(summary);
-                  if (newDraftId) setActiveDraftId(newDraftId);
+                  if (newDraftId) {
+                    setActiveDraftId(newDraftId);
+                    // The draft now owns this session's uploads; start a fresh
+                    // session so the next draft in this tab does not inherit them.
+                    rotateUploadSession();
+                  }
                   if (updatedFormData) {
                     setFactsOfCase(updatedFormData.facts_of_case || factsOfCase);
                     setGrounds(updatedFormData.grounds || grounds);
@@ -2184,6 +2281,12 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                     setJurisdictionBasis(updatedFormData.jurisdiction_basis || jurisdictionBasis);
                     setInterimReliefSought(updatedFormData.interim_relief_sought || interimReliefSought);
                     setMandatoryParagraphs(updatedFormData.mandatory_paragraphs || mandatoryParagraphs);
+                    // The bot answers free text, but this renders in <input type="date">,
+                    // which only accepts YYYY-MM-DD. Anything else is left for the user
+                    // to pick rather than silently blanking the control.
+                    if (/^\d{4}-\d{2}-\d{2}$/.test(updatedFormData.impugned_order_date || '')) {
+                      setImpugnedOrderDate(updatedFormData.impugned_order_date);
+                    }
                   }
                   setCurrentStep(6);
                   fetchCitations();
@@ -2267,6 +2370,13 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                       Precedents & Case Laws
                     </h3>
                     
+                    {citationNotice && (
+                      <div className="mb-3 rounded-lg border border-outline-variant bg-surface-container-low p-3 flex items-start gap-2">
+                        <span className="material-symbols-outlined text-on-surface-variant text-[18px] mt-0.5">info</span>
+                        <p className="text-xs text-on-surface-variant">{citationNotice}</p>
+                      </div>
+                    )}
+
                     {suggestedJudgments.length === 0 ? (
                       <p className="text-sm text-on-surface-variant italic">No relevant precedents found for this case.</p>
                     ) : (
@@ -2506,7 +2616,12 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
                                 h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
                                 h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                h3: ({...props}) => <h3 className="font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                // Centred, like h1/h2. Mid-document titles — GROUNDS,
+                                // PRAYER, VERIFICATION, Dates & Events — are centred and
+                                // underlined in a filed paper book; left-aligning them was
+                                // the "headings should be in center" defect.
+                                h3: ({...props}) => <h3 className="text-center font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
+                                h4: ({...props}) => <h4 className="text-center font-bold uppercase mt-5 mb-2" style={{ fontSize: '14pt', margin: '1rem 0 0.5rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
                                 p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
                                 ul: ({...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
                                 ol: ({...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,

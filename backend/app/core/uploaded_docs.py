@@ -115,8 +115,17 @@ async def fetch_uploaded_docs(
              -- Both sides are NULL-safe: `col = NULL` yields NULL, never true,
              -- so an absent parameter simply contributes no matches. The casts
              -- are required because asyncpg cannot infer a bare NULL's type.
+             --
+             -- The session branch requires draft_id IS NULL: an upload session
+             -- is only a temporary holder for documents that have no draft yet.
+             -- Once /gapfill/start back-links them to a draft they belong to
+             -- THAT draft alone. Without this, a second draft started in the
+             -- same browser tab inherited the first draft's documents, because
+             -- the session id is stored under a key containing the literal
+             -- "new" and is therefore shared by every new draft in that tab.
              WHERE (draft_id = CAST(:did AS BIGINT)
-                    OR upload_session_id = CAST(:sid AS TEXT))
+                    OR (upload_session_id = CAST(:sid AS TEXT)
+                        AND draft_id IS NULL))
                AND ocr_text IS NOT NULL
                AND COALESCE(verify_status, '') <> 'rejected'
              ORDER BY uploaded_at ASC
@@ -202,4 +211,22 @@ def build_uploaded_docs_context(docs: list[dict]) -> tuple[str, list[dict]]:
             "chars_used": len(body),
         })
 
-    return _HEADER + "\n\n".join(blocks), used
+    # The exact annexure list, precomputed. We already know which documents were
+    # filed and what each is called, so the model is asked to reproduce a list
+    # rather than compose one — the same treatment DATES AND EVENTS already gets
+    # in the templates. Instructing it to "list every uploaded document" left it
+    # free to fall back on a generic "certified copy of the impugned order" line.
+    #
+    # The date is left as a blank for the advocate: a document's own date is not
+    # reliably recoverable from OCR, and a wrong date on an annexure is worse
+    # than a blank one.
+    annexures = "\n".join(
+        f"**Annexure No. {i}** — The photo/type copy of {u['label']} dated __/__/____"
+        for i, u in enumerate(used, start=1)
+    )
+    annexure_block = (
+        "\n\n--- ANNEXURE LIST (reproduce EXACTLY as the ANNEXURES section, "
+        "in this order, adding nothing) ---\n" + annexures
+    )
+
+    return _HEADER + "\n\n".join(blocks) + annexure_block, used

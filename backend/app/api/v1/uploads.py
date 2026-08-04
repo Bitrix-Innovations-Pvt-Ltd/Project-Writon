@@ -205,7 +205,11 @@ async def extract_fields(req: ExtractFieldsRequest, db: AsyncSession = Depends(g
         sql_text("""
             SELECT id, doc_type, original_filename, ocr_text
               FROM uploaded_docs
-             WHERE (upload_session_id = :sid
+             -- draft_id IS NULL on the session branch: once uploads are linked
+             -- to a draft they belong to that draft only. The session id is
+             -- shared by every new draft in a browser tab, so without this a
+             -- fresh draft would auto-populate from the previous draft's files.
+             WHERE ((upload_session_id = :sid AND draft_id IS NULL)
                     OR draft_id = CAST(:did AS BIGINT))
                AND ocr_text IS NOT NULL
                AND COALESCE(verify_status, '') <> 'rejected'

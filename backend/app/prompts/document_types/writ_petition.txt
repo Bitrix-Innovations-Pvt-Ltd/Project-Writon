@@ -61,14 +61,4 @@ RELEVANT STATUTES:
 RELEVANT PRECEDENTS:
 {{ judgments_block }}
 
-REQUIRED SECTIONS — write these in this exact order, each wrapped with <<SECTION:NAME>>...content...<<END_SECTION>>:
-1. COVER_AND_INDEX
-2. SYNOPSIS
-3. LIST_OF_DATES
-4. MAIN_PETITION
-5. PRAYER
-6. AFFIDAVIT
-7. VAKALATNAMA
-8. ANNEXURES
-
-Begin drafting now.
+{% include "required_sections.txt" %}
