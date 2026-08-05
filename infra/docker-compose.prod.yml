@@ -22,7 +22,15 @@ services:
     build:
       context: ../backend
     environment:
+      # WARNING: the repo-root .env now holds the DEV branch URL. This compose
+      # file must be run with DATABASE_URL set to the production Neon branch
+      # (e.g. `DATABASE_URL=... docker compose -f docker-compose.prod.yml up`),
+      # otherwise prod silently writes to dev.
       - DATABASE_URL=${DATABASE_URL}
+      # Neon keep-warm heartbeat (backend/main.py::keep_db_warm). Held the
+      # compute awake 24/7 on the default of 240s. Set deliberately here rather
+      # than inherited from the code default.
+      - RAG_KEEPWARM_INTERVAL_SECONDS=${RAG_KEEPWARM_INTERVAL_SECONDS:-0}
       - REDIS_URL=${REDIS_URL}
       - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
       - CLERK_WEBHOOK_SECRET=${CLERK_WEBHOOK_SECRET}
