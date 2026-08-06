@@ -378,6 +378,24 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     `${courtLevel.charAt(0).toUpperCase() + courtLevel.slice(1)} Court of India`;
 
   /**
+   * The city on the "PLACE:" line at the foot of every section — the seat of
+   * the bench being filed at, not the name of the court.
+   *
+   * Taken from the bench record rather than parsed out of the display string:
+   * a bench is stored as "Prayagraj (Allahabad) - Principal Seat" and a court
+   * as "High Court of Judicature at Allahabad", so the display string is a poor
+   * source for a bare city name. The backend cleans the bracketed second name
+   * and falls back to parsing when this is empty.
+   */
+  const getCourtPlace = () => {
+    if (courtLevel !== 'high' || !selectedHighCourt) return '';
+    const hc = highCourtsApiData.find(c => c.name === selectedHighCourt);
+    if (!hc) return '';
+    const bench = hc.benches?.find((b: any) => b.name === selectedHighCourtBench);
+    return bench?.city || hc.principal_seat_city || '';
+  };
+
+  /**
    * Mirrors _value_is_filled in backend/app/modules/gapfill/schema_gaps.py.
    * Matters because the empty form states are '' , [''] and [{date:'',event:''}],
    * all of which must count as empty so auto-fill may write into them.
@@ -947,6 +965,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     const body = {
       court_level: courtLevel,
       court_display: courtDisplay,
+      court_place: getCourtPlace(),
       court_identity_id: selectedCourtIdentityId,
       document_type: documentType,
       document_type_key: mapDocTypeToKey(documentType),
@@ -1066,6 +1085,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
     const body = {
       court_level: courtLevel,
       court_display: courtDisplay,
+      court_place: getCourtPlace(),
       court_identity_id: selectedCourtIdentityId,
       document_type: documentType,
       document_type_key: mapDocTypeToKey(documentType),

@@ -14,4 +14,7 @@ INTERIM RELIEF APPLICATION — HOW TO WRITE IT: this section is a STANDALONE app
   (vi)  The advocate signature block.
 Do NOT also fold the interim relief into the main PRAYER section — it belongs here, and repeating it in the prayer is a drafting error.
 {% endif %}
+{% if 'LIST_OF_DATES' in required_sections %}
+DATES & EVENTS — THE DEPTH CHECK. This is the section that comes back thin, so check it before you leave it. Every Event cell for a date the FACTS OF THE CASE or the UPLOADED DOCUMENTS say anything about must be three to five sentences and at least 40 words, carrying the names, the police station and district, the FIR / case / order numbers, the sections invoked, the authority concerned, what was done or directed, and what followed. If any such cell is a single short line, you have not mined the facts for that date — go back to rule 1B(b), find the material, and rewrite the cell. Only a date about which the material genuinely says nothing may stay at one properly worded sentence.
+{% endif %}
 ⚠️ FINAL REMINDER BEFORE DRAFTING: Every paragraph in the main body MUST start with its sequential number (1. 2. 3. …). No paragraph may appear without a number. Grounds use A. B. C. — not numbers. Prayer sub-clauses use (A) (B) (C). Section titles are centred. The opposing side is called "{{ profile.respondent_label }}". Begin drafting now.

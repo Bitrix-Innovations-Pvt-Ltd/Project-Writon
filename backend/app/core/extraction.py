@@ -173,11 +173,11 @@ _RELIEF_DEFAULT = (
 
 
 def _format_indian_date(iso: Optional[str]) -> Optional[str]:
-    """YYYY-MM-DD -> DD.MM.YYYY, the form used in Indian pleadings."""
+    """YYYY-MM-DD -> DD/MM/YYYY, the one date format used in the draft."""
     if not iso:
         return None
     try:
-        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     except (ValueError, TypeError):
         return None
 

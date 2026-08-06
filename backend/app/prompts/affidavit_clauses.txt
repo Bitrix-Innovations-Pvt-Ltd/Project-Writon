@@ -1,0 +1,37 @@
+
+5A. AFFIDAVIT — STANDARD DEPOSITION PARAGRAPHS (FIXED TEXT, EVERY DOCUMENT). The affidavit is standardised: the same settled paragraphs appear in every paper book, and only the case-specific paragraphs change. Write the AFFIDAVIT section in exactly this order:
+
+   (i)  THE STANDARD PARAGRAPHS BELOW, REPRODUCED WORD FOR WORD, in the order given, numbered 1. 2. 3. … Do NOT reword them, do NOT merge or split them, do NOT shorten them, and do NOT "improve" the language. Do NOT drop one because it looks repetitive of the petition — these are the paragraphs the Court expects to find. Each begins with "That" and ends with a full stop.
+
+   (ii) THEN the case-specific paragraphs, continuing the same numbering. These deal with THIS case: what the {{ deponent.role }} says about the impugned action, the conduct complained of, the urgency, and why the relief prayed for is justified. They are drawn ONLY from the FACTS OF THE CASE, the GROUNDS and the RELIEF SOUGHT given below — the anti-hallucination rules in rule 1 and rule 2 apply here with full force. Write two to five such paragraphs, in formal deposition language.
+
+   (iii) THEN, and always last among the numbered paragraphs, the closing bonafide paragraph marked FINAL below.
+
+   (iv) THEN the centred VERIFICATION block in the fixed form given below.
+
+STANDARD PARAGRAPHS — COPY EXACTLY, IN THIS ORDER:
+
+That I am the {{ deponent.role }} in the above-mentioned case and am fully conversant with the facts and circumstances of the case and am competent to swear this affidavit.
+
+That the accompanying {{ deponent.document }} has been drafted by my counsel under my instructions, and the contents thereof have been read over and explained to me in the language known to me, which I have fully understood.
+
+That the facts stated in the accompanying {{ deponent.document }} are true and correct to my knowledge, and no material fact has been concealed or suppressed therefrom.
+
+That the annexures filed along with the accompanying {{ deponent.document }} are true copies of their respective originals, and I have compared them with the originals.
+
+That no other {{ deponent.document }} on the same cause of action and for the same relief has been filed by me before this Hon'ble Court or before any other Court, save as expressly disclosed in the accompanying {{ deponent.document }}.
+{% if seeks_bail_cancellation %}
+That the conduct of the accused demonstrates clear breach of bail conditions and misuse of the liberty granted by the Court, warranting cancellation of the anticipatory bail in the interest of justice and fair investigation.
+{% endif %}
+FINAL (always the last numbered paragraph of the affidavit):
+
+That this {{ deponent.document }} is being filed bonafide and in the interest of justice, and not for any collateral purpose.
+
+VERIFICATION — FIXED FORM. After the last numbered paragraph, write a centred, bold, underlined heading "VERIFICATION", then:
+
+I, the deponent above named, do hereby verify that the contents of paragraphs 1 to ____ of this affidavit are true to my personal knowledge, and that the contents of paragraphs ____ to ____ are based on legal advice received from my counsel and believed by me to be true. No part of it is false and nothing material has been concealed therefrom.
+
+Verified at {% if filing_place %}{{ filing_place }}{% else %}____________{% endif %} on this {{ filing_date }}.
+
+Leave the paragraph-range blanks as "____" — the advocate fills them in against the final numbering. Write the verification date as {{ filing_date }} and nothing else: the day is blank because the paper book has not yet been filed, and the month and year are the ones it is being filed in.
+

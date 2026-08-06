@@ -38,7 +38,7 @@ CASE DETAILS:
 - Respondent(s): {{ respondents }}
 - Advocate: {{ form_data.advocate_name | default('Not provided') }} (Enrollment: {{ form_data.advocate_enrollment_no | default('') }})
 - Jurisdiction Basis: {{ form_data.jurisdiction_basis | default('') }}
-- Impugned Order Date: {{ form_data.impugned_order_date | default('Not applicable') }}
+- Impugned Order Date: {{ form_data.impugned_order_date | dmy | default('Not applicable', true) }}
 
 FACTS:
 {{ form_data.facts_of_case }}
@@ -47,8 +47,8 @@ DATES AND EVENTS (reproduce ALL rows VERBATIM in the LIST_OF_DATES section as a 
 {% if form_data.dates_and_events %}
 | Date | Event |
 |------|-------|
-{% for de in form_data.dates_and_events %}| {{ de.date }} | {{ de.event }} |
-{% endfor %}{% else %}No dates provided — use ___/___/{{ current_year }} for filing date only.{% endif %}
+{% for de in form_data.dates_and_events %}| {{ de.date | dmy }} | {{ de.event }} |
+{% endfor %}{% else %}No dates provided — use {{ filing_date }} for filing date only.{% endif %}
 
 GROUNDS (user-provided):
 {{ form_data.grounds | default('Not provided — draft standard grounds based on facts') }}

@@ -1238,7 +1238,7 @@ async def retrieve_court_rules(
 
 import os
 import concurrent.futures
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, Undefined
 from datetime import datetime
 
 _reranker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -1246,6 +1246,47 @@ _reranker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 # Initialize jinja2 env at module level
 prompts_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
 jinja_env = Environment(loader=FileSystemLoader(prompts_dir))
+
+
+# ── Date rendering ───────────────────────────────────────────────────────────
+# Every date in a filed pleading reads DD/MM/YYYY. The form stores dates as
+# YYYY-MM-DD (that is what <input type="date"> produces) and the extractor
+# normalises to the same, so without this filter the model was being handed ISO
+# dates and told to reproduce them exactly — and it did, into the draft.
+
+_PROMPT_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
+    "%Y/%m/%d",
+    "%d %B %Y", "%d %b %Y",
+    "%B %d, %Y", "%b %d, %Y",
+)
+
+
+def to_ddmmyyyy(value) -> str:
+    """Render a date as DD/MM/YYYY. Unparseable input is passed through
+    unchanged — a date the advocate typed in a form we do not recognise is
+    still information, and dropping it would silently lose a row."""
+    if value is None or isinstance(value, Undefined):
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%d/%m/%Y")
+    if hasattr(value, "strftime"):          # datetime.date
+        return value.strftime("%d/%m/%Y")
+
+    raw = str(value).strip()
+    if not raw:
+        return ""
+
+    for fmt in _PROMPT_DATE_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return raw
+
+
+jinja_env.filters["dmy"] = to_ddmmyyyy
 
 # ===========================================================================
 # STAGE 4 — Cross-Encoder Reranking
@@ -1541,6 +1582,23 @@ async def get_mandatory_paragraphs(engine, court_level: str, document_type_key: 
 
 
 
+# An application to CANCEL a bail order and an application FOR bail are both
+# drafted from the bail templates, and they need opposite affidavit clauses. The
+# relief the advocate actually asked for is the only reliable signal.
+_BAIL_CANCELLATION = re.compile(
+    r"cancel\w*\b[^.]{0,80}\bbail|\bbail\b[^.]{0,80}\bcancel",
+    re.IGNORECASE,
+)
+
+
+def _seeks_bail_cancellation(form_data: dict) -> bool:
+    haystack = " ".join(
+        str((form_data or {}).get(k) or "")
+        for k in ("relief_sought", "document_type", "interim_relief_sought")
+    )
+    return bool(_BAIL_CANCELLATION.search(haystack))
+
+
 def assemble_prompt(
     form_data: dict,
     judgment_results: list,
@@ -1619,6 +1677,8 @@ def assemble_prompt(
     # existed before core/court_profile.py.
     from app.core.court_profile import (
         court_profile,
+        deponent_terms,
+        filing_place,
         has_interim_relief,
         required_sections,
     )
@@ -1630,9 +1690,23 @@ def assemble_prompt(
     )
     wants_interim = has_interim_relief(form_data)
 
+    # The filing date is not known when the draft is generated — the paper book
+    # is signed and filed days later — so the day stays a blank the advocate
+    # completes, while the month and year are the ones being filed in.
+    now = datetime.now()
+
     context = {
-        "current_year":        datetime.now().year,
+        "current_year":        now.year,
+        "filing_date":         now.strftime("___/%m/%Y"),
+        "filing_place":        filing_place(
+                                   court_level=form_data.get("court_level", ""),
+                                   court_display=court_display,
+                                   court_place=form_data.get("court_place", "") or "",
+                               ),
+        "deponent":            deponent_terms(doc_type_key),
+        "seeks_bail_cancellation": _seeks_bail_cancellation(form_data),
         "doc_type":            doc_type,
+        "doc_type_key":        doc_type_key,
         "court_display":       court_display,
         "profile":             profile,
         "has_interim_relief":  wants_interim,

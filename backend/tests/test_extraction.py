@@ -464,9 +464,10 @@ def test_relief_skeleton_per_document_type():
 
 
 def test_relief_skeleton_uses_indian_date_format():
+    """DD/MM/YYYY — the single date format the whole draft is written in."""
     out = build_relief_skeleton("writ_petition_civil", impugned_order_date="2026-05-20")
-    assert "20.05.2026" in out
-    assert "2026-05-20" not in out
+    assert "20/05/2026" in out
+    assert "2026-05-20" not in out and "20.05.2026" not in out
 
 
 def test_relief_skeleton_never_contains_a_placeholder():
@@ -502,7 +503,7 @@ def test_appeal_skeleton_drops_the_court_clause_when_unknown():
     out = build_relief_skeleton("criminal_appeal", impugned_order_date="2026-05-20")
     assert out is not None
     assert "passed by" not in out
-    assert "20.05.2026" in out
+    assert "20/05/2026" in out
 
 
 def test_relief_skeleton_with_no_inputs_is_none():

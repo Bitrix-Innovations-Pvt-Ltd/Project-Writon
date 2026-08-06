@@ -61,6 +61,10 @@ class GenerateRequest(BaseModel):
     include_doc_ids: Optional[list[int]] = None
     court_level: str = "supreme"
     court_display: str = "Supreme Court of India"
+    # City of the selected bench (high_court_benches.city), used for the "PLACE:"
+    # line at the foot of every section. Sent by the frontend; when it is absent
+    # core/court_profile.filing_place falls back to parsing court_display.
+    court_place: str = ""
     court_identity_id: Optional[int] = None   # sent explicitly from frontend Step 1b dropdown
     document_type: str = ""
     document_type_key: Optional[str] = None   # prompt template key (e.g. 'writ_petition_civil')
@@ -306,7 +310,14 @@ async def _rag_stream(req: GenerateRequest):
             messages=[{"role": "user", "content": prompt}],
             stream=True,
             temperature=0.2,
-            max_tokens=8192,
+            # One call writes the whole paper book — index, dates & events, the
+            # body, prayer, affidavit, vakalatnama and annexures. At 8192 the
+            # model had to budget across all of them and compressed the early
+            # sections, which is why the Dates & Events table came out thin no
+            # matter how the prompt asked for detail. The model's ceiling is
+            # 64K; the response is streamed, so a larger cap costs nothing when
+            # the draft is shorter.
+            max_tokens=15000,
         )
         async for chunk in stream:
             delta = chunk.choices[0].delta.content if chunk.choices else None

@@ -23,6 +23,7 @@ convention to courts we have not seen a filing from would be a guess, and a
 wrong house style is a listing objection.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -60,6 +61,151 @@ _FRONT_MATTER_TYPES = {
 def body_section(document_type_key: str) -> str:
     """MAIN_PETITION / MAIN_APPLICATION / MEMORANDUM_OF_APPEAL."""
     return _BODY_SECTIONS.get(document_type_key or "", _DEFAULT_BODY_SECTION)
+
+
+# ── Deponent terminology ─────────────────────────────────────────────────────
+# The affidavit is standardised across documents, but the deponent is not called
+# the same thing in each: a bail matter has an applicant, an appeal an appellant.
+# The standard clauses in prompts/affidavit_clauses.txt read from here so that
+# one set of hardcoded paragraphs serves every document type.
+
+@dataclass(frozen=True)
+class DeponentTerms:
+    role: str          # "petitioner"  — used mid-sentence
+    role_title: str    # "Petitioner"  — used at the head of a sentence
+    document: str      # "petition"    — what the affidavit is filed in support of
+
+
+_DEPONENT_TERMS = {
+    "bail_application":  DeponentTerms("applicant", "Applicant", "application"),
+    "anticipatory_bail": DeponentTerms("applicant", "Applicant", "application"),
+    "civil_appeal":      DeponentTerms("appellant", "Appellant", "appeal"),
+    "criminal_appeal":   DeponentTerms("appellant", "Appellant", "appeal"),
+}
+_DEFAULT_DEPONENT = DeponentTerms("petitioner", "Petitioner", "petition")
+
+
+def deponent_terms(document_type_key: str = "") -> DeponentTerms:
+    """What this document type calls the person swearing the affidavit."""
+    return _DEPONENT_TERMS.get(document_type_key or "", _DEFAULT_DEPONENT)
+
+
+# ── Filing place ─────────────────────────────────────────────────────────────
+# "PLACE:" at the foot of every section is the city the pleading is signed and
+# filed at — the seat of the court or, where the court sits in more than one
+# city, the bench the advocate selected. It was previously printed as a blank
+# line for the advocate to fill in by hand on every page of the paper book.
+
+_SUPREME_COURT_SEAT = "New Delhi"
+
+# Words that decorate a seat name without being part of the city.
+_SEAT_NOISE = re.compile(
+    r"\b(principal\s+seat|permanent\s+bench|circuit\s+bench|circuit\s+sitting"
+    r"|bench(?:es)?|wing|seat|at)\b",
+    re.IGNORECASE,
+)
+
+# A seat that still names a court is not a city — "PLACE:" takes the city alone.
+_NOT_A_CITY = re.compile(
+    r"\b(court|judicature|tribunal|commission|authority|forum)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_COURT_AT = re.compile(r"\bat\s+(.+)$", re.IGNORECASE)
+_HIGH_COURT_OF = re.compile(
+    r"high\s+court\s+(?:of|for)\s+(?:judicature\s+(?:of|for|at)\s+)?(.+)$",
+    re.IGNORECASE,
+)
+_HIGH_COURT_PREFIXED = re.compile(r"^(.+?)\s+high\s+court\b", re.IGNORECASE)
+_DISTRICT_COURT = re.compile(r"^(.+?)\s+district\s+court\b", re.IGNORECASE)
+
+
+def _clean_seat(text: str) -> str:
+    """Reduce a seat label to the bare city name.
+
+    The seat values carry a second name in brackets — "Prayagraj (Allahabad)",
+    "Kochi (Ernakulam)", "Chhatrapati Sambhajinagar (Aurangabad)" — and the twin
+    -wing courts carry two cities separated by a slash. A pleading is signed at
+    one city under its current name, so the bracket and everything after a slash
+    are dropped rather than flattened into the line.
+    """
+    cleaned = re.sub(r"\(.*?\)", " ", text or "")     # drop "(Allahabad)"
+    cleaned = cleaned.split("/")[0]                    # "Srinagar / Jammu" -> Srinagar
+    cleaned = _SEAT_NOISE.sub(" ", cleaned)
+    cleaned = re.sub(r"[(),]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(" -–—,.")
+    return "" if _NOT_A_CITY.search(cleaned) else cleaned
+
+
+def filing_place(
+    court_level: str = "",
+    court_display: str = "",
+    court_place: str = "",
+) -> str:
+    """The city that goes on the "PLACE:" line, or "" when it cannot be derived.
+
+    `court_place` is the authoritative value: high_court_benches.city for the
+    bench the advocate selected, sent by the frontend. Everything below it is a
+    fallback for the callers that do not send one (district courts, tribunals,
+    and any client still posting only a display string).
+
+    Returning "" rather than a guess matters: the prompt keeps the fill-in blank
+    for an unrecognised court, which is what the advocate had before. A wrong
+    city printed on every page of a paper book is worse than an empty line.
+    """
+    seat = _clean_seat(court_place)
+    if seat:
+        return seat
+
+    display = (court_display or "").strip()
+    if not display:
+        return ""
+
+    level = (court_level or "").lower()
+    if level == "supreme" or "supreme court" in display.lower():
+        return _SUPREME_COURT_SEAT
+
+    # The frontend joins the court and the selected bench with " - ", and the
+    # bench label may itself contain one: "High Court of Judicature at Allahabad
+    # - Prayagraj (Allahabad) - Principal Seat". Work backwards through the
+    # parts — the last one that survives cleaning as a city is the seat, so
+    # "Principal Seat" is skipped and "Prayagraj" is taken. The court name at
+    # the front can never win: _clean_seat rejects anything naming a court.
+    if " - " in display:
+        for part in reversed(display.split(" - ")):
+            seat = _clean_seat(part)
+            if seat:
+                return seat
+
+    segments = [s.strip() for s in display.split(",") if s.strip()]
+
+    # "Lucknow Bench, Central Administrative Tribunal" — the bench segment can
+    # sit either side of the comma.
+    for segment in segments:
+        if re.search(r"\b(bench|seat)\b", segment, re.IGNORECASE):
+            seat = _clean_seat(segment)
+            if seat:
+                return seat
+
+    head = segments[0] if segments else display
+
+    m = _DISTRICT_COURT.search(head)          # "Lucknow District Court, U.P."
+    if m:
+        return _clean_seat(m.group(1))
+
+    if re.search(r"high\s+court", head, re.IGNORECASE):
+        m = _HIGH_COURT_AT.search(head)       # "High Court of Judicature at Bombay"
+        if m:
+            return _clean_seat(m.group(1))
+        m = _HIGH_COURT_OF.search(head)       # "High Court of Delhi"
+        if m:
+            return _clean_seat(m.group(1))
+        m = _HIGH_COURT_PREFIXED.search(head)  # "Allahabad High Court"
+        if m:
+            return _clean_seat(m.group(1))
+
+    return ""
 
 
 @dataclass(frozen=True)
