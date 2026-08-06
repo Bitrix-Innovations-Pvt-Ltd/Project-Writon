@@ -1,30 +1,24 @@
 
-5A. AFFIDAVIT — STANDARD DEPOSITION PARAGRAPHS (FIXED TEXT, EVERY DOCUMENT). The affidavit is standardised: the same settled paragraphs appear in every paper book, and only the case-specific paragraphs change. Write the AFFIDAVIT section in exactly this order:
+5A. AFFIDAVIT — FIXED TEXT, SHORT, IDENTICAL IN EVERY DOCUMENT. The affidavit is NOT a place to re-plead the case. The facts are already pleaded, paragraph by paragraph, in the body of the {{ deponent.document }}; the affidavit does nothing but verify them on oath. It is therefore SHORT and it is FIXED.
 
-   (i)  THE STANDARD PARAGRAPHS BELOW, REPRODUCED WORD FOR WORD, in the order given, numbered 1. 2. 3. … Do NOT reword them, do NOT merge or split them, do NOT shorten them, and do NOT "improve" the language. Do NOT drop one because it looks repetitive of the petition — these are the paragraphs the Court expects to find. Each begins with "That" and ends with a full stop.
+   Write the AFFIDAVIT section as: the court heading and long-form cause title, the centred heading, the deponent block, then ONLY the numbered paragraphs listed below, then the VERIFICATION block, then the signature block.
 
-   (ii) THEN the case-specific paragraphs, continuing the same numbering. These deal with THIS case: what the {{ deponent.role }} says about the impugned action, the conduct complained of, the urgency, and why the relief prayed for is justified. They are drawn ONLY from the FACTS OF THE CASE, the GROUNDS and the RELIEF SOUGHT given below — the anti-hallucination rules in rule 1 and rule 2 apply here with full force. Write two to five such paragraphs, in formal deposition language.
+   THE NUMBERED PARAGRAPHS ARE A CLOSED LIST. Reproduce the paragraphs below WORD FOR WORD, in the order given, numbered 1. 2. 3. … Do NOT reword them, do NOT merge or split them, do NOT shorten them, and do NOT "improve" the language.
+{% if seeks_bail_cancellation %}   There are FIVE numbered paragraphs in this document — no more.
+{% else %}   There are FOUR numbered paragraphs in this document — no more.
+{% endif %}
+   Do NOT add a paragraph of your own. In particular, do NOT add paragraphs narrating the FIR, the parties, the impugned order, the dates, the conduct complained of, the urgency, or the grounds — every one of those belongs in the body of the {{ deponent.document }} and repeating it here is a drafting error, not thoroughness. If you find yourself writing a paragraph that states a fact of THIS case, delete it.
 
-   (iii) THEN, and always last among the numbered paragraphs, the closing bonafide paragraph marked FINAL below.
-
-   (iv) THEN the centred VERIFICATION block in the fixed form given below.
-
-STANDARD PARAGRAPHS — COPY EXACTLY, IN THIS ORDER:
+THE PARAGRAPHS — COPY EXACTLY, IN THIS ORDER:
 
 That I am the {{ deponent.role }} in the above-mentioned case and am fully conversant with the facts and circumstances of the case and am competent to swear this affidavit.
 
-That the accompanying {{ deponent.document }} has been drafted by my counsel under my instructions, and the contents thereof have been read over and explained to me in the language known to me, which I have fully understood.
-
 That the facts stated in the accompanying {{ deponent.document }} are true and correct to my knowledge, and no material fact has been concealed or suppressed therefrom.
 
-That the annexures filed along with the accompanying {{ deponent.document }} are true copies of their respective originals, and I have compared them with the originals.
-
-That no other {{ deponent.document }} on the same cause of action and for the same relief has been filed by me before this Hon'ble Court or before any other Court, save as expressly disclosed in the accompanying {{ deponent.document }}.
+That the annexures filed along with the accompanying {{ deponent.document }} are true copies of their respective originals.
 {% if seeks_bail_cancellation %}
 That the conduct of the accused demonstrates clear breach of bail conditions and misuse of the liberty granted by the Court, warranting cancellation of the anticipatory bail in the interest of justice and fair investigation.
 {% endif %}
-FINAL (always the last numbered paragraph of the affidavit):
-
 That this {{ deponent.document }} is being filed bonafide and in the interest of justice, and not for any collateral purpose.
 
 VERIFICATION — FIXED FORM. After the last numbered paragraph, write a centred, bold, underlined heading "VERIFICATION", then:

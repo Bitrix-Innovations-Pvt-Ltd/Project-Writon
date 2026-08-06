@@ -272,13 +272,16 @@ STANDARD_CLOSING = (
 )
 
 
+ALL_KEYS = ("writ_petition", "writ_petition_civil", "writ_petition_criminal",
+            "bail_application", "anticipatory_bail", "civil_appeal",
+            "criminal_appeal")
+
+
 def test_standard_paragraphs_are_hardcoded_into_every_document():
-    for key in ("writ_petition", "writ_petition_civil", "writ_petition_criminal",
-                "bail_application", "anticipatory_bail", "civil_appeal",
-                "criminal_appeal"):
+    for key in ALL_KEYS:
         out = _prompt(key=key)
-        assert "STANDARD PARAGRAPHS — COPY EXACTLY" in out
-        assert "REPRODUCED WORD FOR WORD" in out
+        assert "THE PARAGRAPHS — COPY EXACTLY" in out
+        assert "WORD FOR WORD" in out
         assert "true copies of their respective originals" in out
         assert "no material fact has been concealed or suppressed" in out
 
@@ -308,17 +311,39 @@ def test_deponent_terms(key, role, document):
     assert (terms.role, terms.document) == (role, document)
 
 
-def test_case_specific_paragraphs_are_still_required_and_still_sourced():
-    """Standardising the affidavit must not turn it into a form with no case in
-    it — nor licence the model to invent the case-specific part."""
+def test_the_affidavit_is_a_closed_list_of_four_paragraphs():
+    """The drafted affidavit ran to ten paragraphs because the model was told to
+    add case-specific ones. The facts are pleaded in the body; the affidavit
+    only verifies them."""
     out = _prompt()
-    assert "THEN the case-specific paragraphs" in out
-    assert "the anti-hallucination rules in rule 1 and rule 2 apply" in out
+    assert "THE NUMBERED PARAGRAPHS ARE A CLOSED LIST" in out
+    assert "There are FOUR numbered paragraphs in this document — no more." in out
+    assert "Do NOT add a paragraph of your own." in out
 
 
-def test_the_bonafide_paragraph_is_always_last():
+def test_the_closed_list_grows_by_exactly_one_for_a_cancellation():
+    out = _prompt(
+        key="anticipatory_bail",
+        relief_sought="Cancel the anticipatory bail granted to the accused.",
+    )
+    assert "There are FIVE numbered paragraphs in this document — no more." in out
+    assert "There are FOUR numbered paragraphs" not in out
+
+
+def test_the_model_is_told_which_paragraphs_it_keeps_reaching_for():
+    """A bare count does not stop it — the drafted affidavit's extra paragraphs
+    narrated the FIR, the parties and the conduct complained of."""
     out = _prompt()
-    assert "always the last numbered paragraph of the affidavit" in out
+    for topic in ("the FIR", "the parties", "the impugned order", "the dates",
+                  "the conduct complained of", "the urgency", "the grounds"):
+        assert topic in out
+    assert "If you find yourself writing a paragraph that states a fact of THIS case, delete it." in out
+
+
+def test_no_document_type_asks_for_case_specific_paragraphs():
+    for key in ALL_KEYS:
+        out = _prompt(key=key)
+        assert "case-specific paragraph" not in out.lower()
 
 
 def test_verification_is_fixed_form_and_dated_like_everything_else():
@@ -349,4 +374,4 @@ def test_affidavit_rules_render_for_every_court_profile():
                            ("high", "Delhi High Court")):
         out = _prompt(level=level, display=display)
         assert "{{" not in out and "{%" not in out
-        assert "STANDARD PARAGRAPHS — COPY EXACTLY" in out
+        assert "THE PARAGRAPHS — COPY EXACTLY" in out
