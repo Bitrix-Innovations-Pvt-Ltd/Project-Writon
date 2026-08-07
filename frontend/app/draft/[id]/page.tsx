@@ -9,6 +9,22 @@ import rehypeRaw from 'rehype-raw';
 
 import { districtCourtsData, tribunalsData, specialCourtsData } from './courtsData';
 import GapFillChat from '@/components/draft/GapFillChat';
+import FormatSettingsModal from '@/components/draft/FormatSettingsModal';
+import {
+  DocFormat,
+  DEFAULT_DOC_FORMAT,
+  applyUntouched,
+  buildDocCss,
+  buildPageBoxStyle,
+  buildPrintPageCss,
+  buildWordPageCss,
+  courtLevelMargins,
+  fromCourtFormatting,
+  inlineDocStyles,
+  loadSavedFormat,
+  rootInlineStyle,
+  saveFormat,
+} from '@/lib/docFormat';
 
 const indianStates = Object.keys(districtCourtsData).sort();
 
@@ -229,6 +245,81 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [sectionFormatOverrides, setSectionFormatOverrides] = useState<Record<string, boolean>>({});
   const [availableOverrides, setAvailableOverrides] = useState<any[]>([]);
   const [isLoadingOverrides, setIsLoadingOverrides] = useState(false);
+
+  // ── Document formatting ────────────────────────────────────────────────────
+  // How the generated draft is typeset. One object drives the on-screen page,
+  // the print stylesheet and the Word export (see lib/docFormat.ts). The dialog
+  // opens as soon as the wizard is entered and is reopenable from the editor
+  // toolbar afterwards.
+  const [docFormat, setDocFormat] = useState<DocFormat>(DEFAULT_DOC_FORMAT);
+  const [showFormatModal, setShowFormatModal] = useState(false);
+  // Fields the user set by hand. A court-level or court-sourced default must
+  // never overwrite one of these — picking a High Court at Step 1 after typing
+  // custom margins would otherwise silently undo them.
+  const formatTouchedRef = useRef<Set<string>>(new Set());
+  // court_formatting_rules.source_note — the AHC seed uses it to say the 1952
+  // rulebook predates e-filing, and asks that the gap be surfaced in the UI.
+  const [courtFormatNote, setCourtFormatNote] = useState<string | null>(null);
+  const [courtFormatSourced, setCourtFormatSourced] = useState(false);
+  // What "Reset to court default" restores: the format with no user edits.
+  const [formatResetTarget, setFormatResetTarget] = useState<DocFormat>(DEFAULT_DOC_FORMAT);
+
+  useEffect(() => {
+    const saved = loadSavedFormat();
+    if (saved) {
+      setDocFormat(saved.format);
+      formatTouchedRef.current = new Set(saved.touched);
+    }
+    setShowFormatModal(true);
+  }, []);
+
+  // Binding-edge gutter follows the court level until the user overrides it.
+  useEffect(() => {
+    const margins = { ...DEFAULT_DOC_FORMAT.margins, ...courtLevelMargins(courtLevel) };
+    setFormatResetTarget(prev => ({ ...prev, margins }));
+    setDocFormat(prev => applyUntouched(prev, { margins }, formatTouchedRef.current));
+  }, [courtLevel]);
+
+  // Typography the selected court's rulebook actually specifies. Most rulebooks
+  // are paper-era and leave font/size/spacing NULL, so only non-null fields come
+  // back from fromCourtFormatting and only untouched fields are overwritten.
+  useEffect(() => {
+    const shortCode = selectedCourtIdentityId
+      ? courtIdentities.find(c => c.id === selectedCourtIdentityId)?.short_code
+      : null;
+    if (!shortCode) {
+      setCourtFormatNote(null);
+      setCourtFormatSourced(false);
+      return;
+    }
+    let cancelled = false;
+    const fetchFormatting = async () => {
+      try {
+        const res = await fetch(`/api/v1/court-identities/${shortCode}/formatting`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const row = (data.formatting || [])[0];
+        if (!row || cancelled) return;
+        setCourtFormatNote(row.source_note || null);
+        setCourtFormatSourced(Boolean(row.is_sourced_from_rulebook));
+        const sourced = fromCourtFormatting(row);
+        if (!Object.keys(sourced).length) return;
+        setFormatResetTarget(prev => ({ ...prev, ...sourced }));
+        setDocFormat(prev => applyUntouched(prev, sourced, formatTouchedRef.current));
+      } catch (e) {
+        console.error('Failed to fetch court formatting rules:', e);
+      }
+    };
+    fetchFormatting();
+    return () => { cancelled = true; };
+  }, [selectedCourtIdentityId, courtIdentities]);
+
+  const handleApplyFormat = (next: DocFormat, changedKeys: string[]) => {
+    changedKeys.forEach(k => formatTouchedRef.current.add(k));
+    setDocFormat(next);
+    saveFormat(next, formatTouchedRef.current);
+    setShowFormatModal(false);
+  };
 
   useEffect(() => {
     if (currentStep === 6) {
@@ -1214,7 +1305,16 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       }
     });
     
-    const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><style>@page WordSection1 { size: 8.5in 14.0in; margin: 1.0in 1.0in 1.0in 1.0in; } div.WordSection1 { page: WordSection1; } body { font-family: 'Times New Roman', Times, serif; font-size: 14pt; line-height: 1.5; } h1, h2, h3, h4, h5, h6 { font-family: 'Times New Roman', Times, serif; font-size: 14pt; font-weight: bold; }</style></head><body><div class='WordSection1'>";
+    // The download carries the same DocFormat the user approved on screen.
+    //
+    // Belt and braces, because Word decides for itself how much of a stylesheet
+    // to honour: the styles are written onto the elements as `style` attributes
+    // (inlineDocStyles), AND emitted as a stylesheet for anything that reads
+    // .doc files by their CSS. Page size and margins can only come from the
+    // @page rule, which Word does support.
+    finalHtml = inlineDocStyles(finalHtml, docFormat);
+    const wordCss = `${buildWordPageCss(docFormat)}\n${buildDocCss(docFormat, '')}`;
+    const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><style>" + wordCss + "</style></head><body style=\"" + rootInlineStyle(docFormat) + "\"><div class='WordSection1' style=\"" + rootInlineStyle(docFormat) + "\">";
     const footer = "</div></body></html>";
     const html = header + finalHtml + footer;
     const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
@@ -1269,6 +1369,18 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
 
   return (
     <div className="font-body-md text-body-md bg-surface min-h-screen text-on-surface flex flex-col relative">
+      {/* Formatting dialog — shown once when the wizard is entered, and again
+          whenever the editor's Format button is pressed. */}
+      <FormatSettingsModal
+        open={showFormatModal}
+        value={docFormat}
+        resetTarget={formatResetTarget}
+        courtNote={courtFormatNote}
+        courtSourced={courtFormatSourced}
+        onApply={handleApplyFormat}
+        onClose={() => setShowFormatModal(false)}
+      />
+
       {/* Toast Notification */}
       {uploadError && (
         <div className="fixed top-24 right-6 z-[100] animate-in fade-in slide-in-from-top-4 duration-300">
@@ -2534,6 +2646,18 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                   <button onMouseDown={(e) => e.preventDefault()} onClick={() => handleFormat('justifyFull')} className="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-low text-on-surface transition-colors">
                     <span className="material-symbols-outlined text-lg">format_align_justify</span>
                   </button>
+                  <div className="w-px h-6 bg-outline-variant mx-1"></div>
+                  {/* Reopens the dialog shown at the start of the wizard, so the
+                      document's font, spacing and margins stay changeable after
+                      the draft has been generated. */}
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setShowFormatModal(true)}
+                    className="flex items-center gap-1.5 px-3 h-8 rounded hover:bg-surface-container-low text-on-surface text-sm font-bold transition-colors"
+                    title="Font, spacing and margins">
+                    <span className="material-symbols-outlined text-lg">format_shapes</span>
+                    Format
+                  </button>
                 </div>
                 
                 <div className="flex items-center gap-3">
@@ -2564,19 +2688,26 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
               {/* Editor Workspace */}
               <div className="flex-1 overflow-y-auto bg-surface-container-highest p-8 md:p-12 print:p-0 print:bg-white print:overflow-visible print:block">
                 
-                {/* Dynamically Inject Print Styling to Override Inline Padding & Configure Page Margins */}
+                {/* Typography for the document itself, applied on screen and in
+                    print alike. Deliberately a stylesheet rather than inline
+                    styles: "Edit Text" snapshots each page's innerHTML, so
+                    inline styles would freeze into the saved HTML and a later
+                    formatting change would never reach an edited page. */}
+                <style type="text/css">{buildDocCss(docFormat, '.wr-doc')}</style>
+
+                {/* Print-only: page size/margins, and stripping the on-screen
+                    paper chrome so the browser's own page box is what prints.
+                    The width/max-width resets matter — on screen the page div
+                    is sized to the paper in pixels, which would overflow the
+                    printer's already-margined page area if it survived here. */}
                 <style type="text/css" media="print">
                   {`
-                    @page {
-                      size: 8.5in 14in;
-                      margin-top: 1in;
-                      margin-bottom: 0.5in;
-                      margin-right: 1in;
-                      margin-left: ${courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in'};
-                    }
+                    ${buildPrintPageCss(docFormat)}
                     .html2pdf__page-break {
                       padding: 0 !important;
                       margin: 0 !important;
+                      width: auto !important;
+                      max-width: none !important;
                       box-shadow: none !important;
                       border: none !important;
                       background: transparent !important;
@@ -2610,23 +2741,27 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                     return parsed.map(({ name, content }, index) => (
                       <div 
                         key={index}
-                        className="html2pdf__page-break max-w-[816px] mx-auto bg-white shadow-xl min-h-[1344px] border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
-                        style={{ 
+                        className="html2pdf__page-break mx-auto bg-white shadow-xl border border-outline-variant mb-8 print:shadow-none print:border-none print:m-0 print:max-w-none print:break-after-page"
+                        style={{
+                          // Paper size and margins come from the format dialog.
+                          ...buildPageBoxStyle(docFormat),
                           boxShadow: '0 10px 25px rgba(0,0,0,0.05), 0 0 1px rgba(0,0,0,0.1)',
-                          paddingTop: '1in',
-                          paddingRight: '1in',
-                          paddingBottom: '0.5in',
-                          paddingLeft: courtLevel === 'supreme' ? '2in' : courtLevel === 'high' ? '1.5in' : '1in',
                           position: 'relative'
                         }}
                       >
                         {!isEditingMode && !hasEdited ? (
-                          <div 
+                          <div
                             ref={el => { pageRefs.current[index] = el; }}
-                            className="text-on-surface outline-none prose prose-slate max-w-none"
-                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt', lineHeight: '1.5' }}
+                            className="wr-doc text-on-surface outline-none max-w-none"
                           >
-                            <ReactMarkdown 
+                            {/* Font, size, spacing, alignment and heading style
+                                all come from the .wr-doc stylesheet above — the
+                                elements below carry only structural classes, so
+                                a formatting change reaches pages that have
+                                already been edited. Headings are centred by
+                                default: mid-document titles (GROUNDS, PRAYER,
+                                VERIFICATION) are centred in a filed paper book. */}
+                            <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
                               rehypePlugins={[rehypeRaw]}
                               components={{
@@ -2634,18 +2769,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 table: ({...props}) => <table className="w-full text-left border-collapse border border-outline-variant my-6" {...props} />,
                                 th: ({...props}) => <th className="border border-outline-variant px-4 py-2 bg-surface-container-low font-bold" {...props} />,
                                 td: ({...props}) => <td className="border border-outline-variant px-4 py-2" {...props} />,
-                                h1: ({...props}) => <h1 className="text-center font-bold uppercase mb-6" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                h2: ({...props}) => <h2 className="text-center font-bold uppercase mt-8 mb-4" style={{ fontSize: '14pt', margin: '1.5rem 0 1rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                // Centred, like h1/h2. Mid-document titles — GROUNDS,
-                                // PRAYER, VERIFICATION, Dates & Events — are centred and
-                                // underlined in a filed paper book; left-aligning them was
-                                // the "headings should be in center" defect.
-                                h3: ({...props}) => <h3 className="text-center font-bold uppercase mt-6 mb-3" style={{ fontSize: '14pt', margin: '1.2rem 0 0.6rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                h4: ({...props}) => <h4 className="text-center font-bold uppercase mt-5 mb-2" style={{ fontSize: '14pt', margin: '1rem 0 0.5rem 0', fontFamily: '"Times New Roman", Times, serif' }} {...props} />,
-                                p: ({...props}) => <p className="whitespace-pre-wrap" style={{ marginBottom: '1rem', marginTop: 0, textAlign: 'justify', textJustify: 'inter-word', lineHeight: '1.5' }} {...props} />,
-                                ul: ({...props}) => <ul className="list-disc pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                                ol: ({...props}) => <ol className="list-decimal pl-6 my-3" style={{ margin: '0.5rem 0 0.5rem 1.5rem' }} {...props} />,
-                                li: ({...props}) => <li style={{ margin: '0.3rem 0', lineHeight: '1.5', textAlign: 'justify' }} {...props} />
+                                ul: ({...props}) => <ul className="list-disc pl-6" {...props} />,
+                                ol: ({...props}) => <ol className="list-decimal pl-6" {...props} />,
+                                p: ({...props}) => <p className="whitespace-pre-wrap" {...props} />
                               }}
                             >
                               {content}
@@ -2654,8 +2780,8 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                         ) : (
                           <div
                             contentEditable={isEditingMode}
-                            className={`text-on-surface outline-none prose prose-slate max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
-                            style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '14pt', lineHeight: '1.5', minHeight: '100%' }}
+                            className={`wr-doc text-on-surface outline-none max-w-none ${isEditingMode ? 'ring-2 ring-primary/20 rounded' : ''}`}
+                            style={{ minHeight: '100%' }}
                             dangerouslySetInnerHTML={{ __html: hasEdited ? htmlPages[index] : (pageRefs.current[index]?.innerHTML || '') }}
                             onInput={(e) => {
                               if (!hasEdited) setHasEdited(true);
