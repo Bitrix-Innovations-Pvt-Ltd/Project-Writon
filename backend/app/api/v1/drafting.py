@@ -34,7 +34,55 @@ from app.core.rag import (
 # Final-generation model — env-configurable like the rewrite model
 GENERATION_MODEL = os.getenv("RAG_GENERATION_MODEL", "anthropic/claude-sonnet-4")
 
+# Paragraph picker (Step 6): lets the advocate tick which whole paragraphs of a
+# judgment get quoted verbatim in the Grounds. Off by default until rolled out.
+PARA_PICKER_ENABLED = os.getenv("PARA_PICKER_ENABLED", "0") not in ("0", "false", "False")
+
 router = APIRouter(prefix="/drafts", tags=["drafts"])
+
+async def _attach_quoted_paragraphs(judgments: list) -> None:
+    """Resolve the paragraphs the advocate ticked in Step 6 into quotable text.
+
+    Mutates each judgment dict in place, adding ``quoted_paragraph_texts`` as a
+    list of ``{"label": "43", "text": ...}``. The LLM tidy-up pass runs here
+    rather than in the picker: it costs 2-7s per paragraph, which is invisible
+    against draft generation but would make a click-to-expand feel broken.
+
+    Failures are swallowed — a missing block quote must never abort the draft.
+    """
+    from app.core.paragraph_service import get_judgment_paragraphs
+
+    wanted = [j for j in judgments
+              if isinstance(j, dict) and j.get("quoted_paragraphs")]
+    if not wanted:
+        return
+
+    async def resolve(judgment: dict) -> None:
+        numbers = set(judgment.get("quoted_paragraphs") or [])
+        try:
+            data = await get_judgment_paragraphs(
+                engine,
+                judgment_id=judgment.get("id"),
+                chunk_id=judgment.get("chunk_id"),
+                chunk_index=judgment.get("chunk_index"),
+                include_all=True,
+                clean=True,
+            )
+        except Exception as exc:
+            print(f"[generate] paragraph fetch failed for {judgment.get('id')}: {exc}")
+            return
+
+        judgment["quoted_paragraph_texts"] = [
+            {"label": p.get("label"), "text": p.get("text", ""),
+             "uncertain": bool(p.get("number_uncertain"))}
+            for p in data.get("paragraphs", [])
+            if p.get("para_number") in numbers
+        ]
+
+    await asyncio.gather(*[resolve(j) for j in wanted])
+    total = sum(len(j.get("quoted_paragraph_texts") or []) for j in wanted)
+    print(f"[generate] attached {total} verbatim paragraph(s) across {len(wanted)} judgment(s)")
+
 
 async def _get_embedding_fn():
     """Returns a sync callable that encodes a string to a vector using Legal-BERT.
@@ -166,6 +214,9 @@ async def _rag_stream(req: GenerateRequest):
         top_statutes = req.selected_statutes or []
         print(f"[generate] using Step 6 selection: "
               f"{len(top_judgments)} judgment(s), {len(top_statutes)} statute(s)")
+        if PARA_PICKER_ENABLED:
+            yield "event: status\ndata: Fetching quoted paragraphs...\n\n"
+            await _attach_quoted_paragraphs(top_judgments)
     else:
         if req.selected_judgments is not None or req.selected_statutes is not None:
             print("[generate] Step 6 selection arrived empty — falling back to "
@@ -355,6 +406,50 @@ async def generate_draft(req: GenerateRequest):
             "X-Accel-Buffering": "no",
         }
     )
+
+class JudgmentParagraphsRequest(BaseModel):
+    judgment_id: int
+    # Either identifies the retrieved chunk. suggest-citations returns both, but
+    # chunk_id is the reliable one — chunk_index is only unique per judgment.
+    chunk_id: Optional[int] = None
+    chunk_index: Optional[int] = None
+    # True returns every paragraph of the judgment instead of only the ones the
+    # retrieved chunk matched. Segmentation costs ~8 ms either way.
+    include_all: bool = False
+    disable_cache: bool = False
+
+
+@router.post("/judgment-paragraphs")
+async def judgment_paragraphs(req: JudgmentParagraphsRequest):
+    """Whole numbered paragraphs behind a retrieved citation.
+
+    Called lazily when the advocate expands a citation in Step 6, so the
+    20-25s suggest-citations budget is untouched. Paragraph numbers are recovered
+    deterministically from judgments.full_text and are never model-generated —
+    see core/paragraphs.py for why.
+    """
+    if not PARA_PICKER_ENABLED:
+        return {"judgment_id": req.judgment_id, "paragraphs": [],
+                "coverage": "none", "reason": "feature_disabled"}
+
+    from app.core.paragraph_service import get_judgment_paragraphs
+
+    try:
+        return await get_judgment_paragraphs(
+            engine,
+            judgment_id=req.judgment_id,
+            chunk_id=req.chunk_id,
+            chunk_index=req.chunk_index,
+            include_all=req.include_all,
+            disable_cache=req.disable_cache,
+        )
+    except Exception as exc:
+        # The picker is an enhancement — a failure here must never block the
+        # advocate from selecting the citation itself.
+        print(f"[paragraphs] endpoint error for judgment {req.judgment_id}: {exc}")
+        return {"judgment_id": req.judgment_id, "paragraphs": [],
+                "coverage": "none", "reason": "error"}
+
 
 @router.post("/suggest-citations")
 async def suggest_citations(req: GenerateRequest):

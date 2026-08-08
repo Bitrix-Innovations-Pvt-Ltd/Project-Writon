@@ -118,3 +118,111 @@ def test_selected_citations_render_into_the_prompt():
     assert "Arnesh Kumar v. State of Bihar" in prompt
     assert "Section 438 CrPC" in prompt
     assert "[No statute sections retrieved]" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Verbatim paragraph quoting (paragraph picker, Step 6)
+# ---------------------------------------------------------------------------
+def _prompt_for(judgment):
+    from app.core.rag import assemble_prompt
+    return assemble_prompt(
+        {"document_type": "Anticipatory Bail", "document_type_key": "anticipatory_bail",
+         "court_display": "High Court", "subject_matter": "Criminal Law",
+         "petitioners": ["A"], "respondents": ["B"], "facts_of_case": "F",
+         "grounds": "", "relief_sought": "R", "mandatory_paragraphs": "",
+         "dates_and_events": []},
+        [judgment], [STATUTE], uploaded_docs_context="",
+    )
+
+
+PARA_TEXT = ("43. Article 28 deals with the rights of individuals and secures to "
+             "them the right not to take part in any religious instruction.")
+
+
+def test_quoted_paragraph_reaches_the_prompt_verbatim():
+    """The advocate ticked paragraph 43 — it must arrive whole, not summarised."""
+    judgment = {**JUDGMENT, "quoted_paragraph_texts": [
+        {"label": "43", "text": PARA_TEXT, "uncertain": False}]}
+    prompt = _prompt_for(judgment)
+    assert PARA_TEXT in prompt
+    # The rendered marker, not the phrase "VERBATIM QUOTE" — that also appears in
+    # the standing citation rules in base_rules.txt.
+    assert "VERBATIM QUOTE — paragraph 43 of Arnesh Kumar v. State of Bihar" in prompt
+
+
+def test_uncertain_paragraph_range_is_flagged_to_the_model():
+    """A lost OCR marker means the block spans 5-6; the model must be told so it
+    does not introduce the quote under a single wrong paragraph number."""
+    judgment = {**JUDGMENT, "quoted_paragraph_texts": [
+        {"label": "5-6", "text": PARA_TEXT, "uncertain": True}]}
+    prompt = _prompt_for(judgment)
+    assert "paragraphs 5-6" in prompt
+    assert "scan lost a marker" in prompt
+
+
+def test_multiple_quoted_paragraphs_all_render():
+    judgment = {**JUDGMENT, "quoted_paragraph_texts": [
+        {"label": "43", "text": "43. First selected paragraph.", "uncertain": False},
+        {"label": "44", "text": "44. Second selected paragraph.", "uncertain": False}]}
+    prompt = _prompt_for(judgment)
+    assert "43. First selected paragraph." in prompt
+    assert "44. Second selected paragraph." in prompt
+
+
+_RENDERED_QUOTE_MARKER = "Reproduce this text EXACTLY"
+
+
+def test_judgment_without_quotes_is_unchanged():
+    """Citations with no paragraph picked must render exactly as before."""
+    prompt = _prompt_for(JUDGMENT)
+    assert _RENDERED_QUOTE_MARKER not in prompt
+    assert "Arnesh Kumar v. State of Bihar" in prompt
+
+
+def test_empty_quoted_text_is_skipped():
+    judgment = {**JUDGMENT, "quoted_paragraph_texts": [
+        {"label": "43", "text": "   ", "uncertain": False}]}
+    assert _RENDERED_QUOTE_MARKER not in _prompt_for(judgment)
+
+
+def test_attach_quoted_paragraphs_resolves_selected_numbers(monkeypatch):
+    """_attach_quoted_paragraphs keeps only the paragraphs that were ticked."""
+    async def fake_get(engine, judgment_id, chunk_id, chunk_index, include_all, clean):
+        return {"paragraphs": [
+            {"para_number": 42, "label": "42", "text": "not selected",
+             "number_uncertain": False},
+            {"para_number": 43, "label": "43", "text": PARA_TEXT,
+             "number_uncertain": False},
+        ]}
+
+    import app.core.paragraph_service as PS
+    monkeypatch.setattr(PS, "get_judgment_paragraphs", fake_get)
+
+    judgments = [{**JUDGMENT, "quoted_paragraphs": [43]}]
+    asyncio.run(D._attach_quoted_paragraphs(judgments))
+
+    quoted = judgments[0]["quoted_paragraph_texts"]
+    assert [q["label"] for q in quoted] == ["43"]
+    assert quoted[0]["text"] == PARA_TEXT
+
+
+def test_attach_quoted_paragraphs_survives_a_backend_failure(monkeypatch):
+    """A paragraph fetch failure must never abort the draft."""
+    async def boom(**kwargs):
+        raise RuntimeError("neon unavailable")
+
+    import app.core.paragraph_service as PS
+    monkeypatch.setattr(PS, "get_judgment_paragraphs", boom)
+
+    judgments = [{**JUDGMENT, "quoted_paragraphs": [43]}]
+    asyncio.run(D._attach_quoted_paragraphs(judgments))
+    assert "quoted_paragraph_texts" not in judgments[0]
+
+
+def test_attach_quoted_paragraphs_noop_without_selection(monkeypatch):
+    def explode(**kwargs):
+        raise AssertionError("must not query when nothing was ticked")
+
+    import app.core.paragraph_service as PS
+    monkeypatch.setattr(PS, "get_judgment_paragraphs", explode)
+    asyncio.run(D._attach_quoted_paragraphs([dict(JUDGMENT)]))

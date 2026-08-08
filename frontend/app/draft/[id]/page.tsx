@@ -10,6 +10,7 @@ import rehypeRaw from 'rehype-raw';
 import { districtCourtsData, tribunalsData, specialCourtsData } from './courtsData';
 import GapFillChat from '@/components/draft/GapFillChat';
 import FormatSettingsModal from '@/components/draft/FormatSettingsModal';
+import ParagraphPicker from '@/components/draft/ParagraphPicker';
 import {
   DocFormat,
   DEFAULT_DOC_FORMAT,
@@ -35,6 +36,25 @@ const indianStates = Object.keys(districtCourtsData).sort();
 type DocTranslation = { language: string; translation_status: string };
 
 const LANGUAGE_NAMES: Record<string, string> = { hi: 'Hindi', mixed: 'Hindi' };
+
+/**
+ * Stable identity for "no paragraphs picked". Passing a fresh `new Set()` on
+ * every render would change the prop each time and re-run the picker's effects.
+ */
+const EMPTY_PARA_SET: Set<number> = new Set();
+
+/**
+ * On a remote deployment the local API bypass must be ignored so requests go
+ * through Nginx on a relative path. Mirrors the logic in fetchCitations.
+ */
+const resolveApiUrl = (): string => {
+  if (typeof window !== 'undefined'
+      && window.location.hostname !== 'localhost'
+      && window.location.hostname !== '127.0.0.1') {
+    return '';
+  }
+  return process.env.NEXT_PUBLIC_API_URL || '';
+};
 
 /**
  * Shown when a Hindi upload was machine-translated to English before it reached
@@ -204,6 +224,10 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   const [isLoadingCitations, setIsLoadingCitations] = useState(false);
   // Explains an empty precedent pre-selection (see fetchCitations).
   const [citationNotice, setCitationNotice] = useState<string | null>(null);
+  // judgment id -> paragraph numbers the advocate ticked for verbatim quoting.
+  // Kept separate from selectedJudgmentIds: a judgment can be cited for its
+  // holding without any paragraph being block-quoted.
+  const [selectedParas, setSelectedParas] = useState<Map<number, Set<number>>>(new Map());
   
   // New Hierarchy States
   const [selectedCategory, setSelectedCategory] = useState<any>(null);
@@ -1196,7 +1220,14 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
       jurisdiction_basis: jurisdictionBasis,
       impugned_order_date: impugnedOrderDate || null,
       dates_and_events: datesAndEvents.filter(de => de.date.trim() || de.event.trim()),
-      selected_judgments: suggestedJudgments.filter(j => selectedJudgmentIds.has(j.id)),
+      // Each judgment carries the paragraph numbers the advocate ticked, so the
+      // backend can fetch that exact text and quote it verbatim in the Grounds.
+      selected_judgments: suggestedJudgments
+        .filter(j => selectedJudgmentIds.has(j.id))
+        .map(j => ({
+          ...j,
+          quoted_paragraphs: Array.from(selectedParas.get(j.id) ?? []).sort((a, b) => a - b),
+        })),
       selected_statutes: suggestedStatutes.filter(s => selectedStatuteIds.has(s.id)),
       draft_id: activeDraftId,
       upload_session_id: uploadSessionIdRef.current,
@@ -2514,19 +2545,31 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                     ) : (
                       <div className="space-y-3">
                         {suggestedJudgments.map((judgment) => (
-                          <label key={judgment.id} className={`flex items-start gap-4 p-4 border rounded-xl cursor-pointer transition-all ${selectedJudgmentIds.has(judgment.id) ? 'border-primary bg-primary/5' : 'border-outline-variant hover:border-primary/30'}`}>
-                            <input 
-                              type="checkbox" 
-                              className="mt-1 w-4 h-4 text-primary rounded border-outline focus:ring-primary"
+                          // A <div>, not a <label>: the paragraph checkboxes below
+                          // are nested inside this card, and inside a <label> every
+                          // one of their clicks would also toggle the judgment.
+                          <div key={judgment.id} className={`flex items-start gap-4 p-4 border rounded-xl transition-all ${selectedJudgmentIds.has(judgment.id) ? 'border-primary bg-primary/5' : 'border-outline-variant hover:border-primary/30'}`}>
+                            <input
+                              type="checkbox"
+                              className="mt-1 w-4 h-4 text-primary rounded border-outline focus:ring-primary cursor-pointer"
                               checked={selectedJudgmentIds.has(judgment.id)}
                               onChange={(e) => {
                                 const newSet = new Set(selectedJudgmentIds);
                                 if (e.target.checked) newSet.add(judgment.id);
-                                else newSet.delete(judgment.id);
+                                else {
+                                  newSet.delete(judgment.id);
+                                  // Deselecting the judgment drops its paragraph
+                                  // picks too, so no orphaned quotes reach generate.
+                                  setSelectedParas(prev => {
+                                    const next = new Map(prev);
+                                    next.delete(judgment.id);
+                                    return next;
+                                  });
+                                }
                                 setSelectedJudgmentIds(newSet);
                               }}
                             />
-                            <div>
+                            <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <h4 className="font-bold text-on-surface">{judgment.title}</h4>
                                 {judgment.case_number && (
@@ -2549,8 +2592,30 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 )}
                               </div>
                               <p className="text-xs text-on-surface-variant mt-1 line-clamp-3">{judgment.text}</p>
+
+                              <ParagraphPicker
+                                judgmentId={judgment.id}
+                                chunkId={judgment.chunk_id ?? null}
+                                chunkIndex={judgment.chunk_index ?? null}
+                                apiUrl={resolveApiUrl()}
+                                selected={selectedParas.get(judgment.id) ?? EMPTY_PARA_SET}
+                                onChange={(paras) => {
+                                  setSelectedParas(prev => {
+                                    const next = new Map(prev);
+                                    if (paras.size === 0) next.delete(judgment.id);
+                                    else next.set(judgment.id, paras);
+                                    return next;
+                                  });
+                                  // Ticking a paragraph implies citing the
+                                  // judgment — otherwise the quote would be
+                                  // dropped at generate time.
+                                  if (paras.size > 0 && !selectedJudgmentIds.has(judgment.id)) {
+                                    setSelectedJudgmentIds(prev => new Set(prev).add(judgment.id));
+                                  }
+                                }}
+                              />
                             </div>
-                          </label>
+                          </div>
                         ))}
                       </div>
                     )}

@@ -1625,10 +1625,32 @@ def assemble_prompt(
         # Prefer a dedicated holding field if populated
         snippet = r.get('holding') or r.get('text', '')
         snippet = snippet[:700] if snippet else ''
-        return (
+        block = (
             f"- {title} [{case_no}] ({year}):\n"
             f"  HOLDING (cite ONLY for this proposition): {snippet}"
         )
+
+        # Paragraphs the advocate ticked in Step 6. These are whole numbered
+        # paragraphs lifted from the judgment text itself, with the number the
+        # report printed — so they must be reproduced exactly, not summarised.
+        quoted = r.get('quoted_paragraph_texts') or []
+        for para in quoted:
+            label = para.get('label', '')
+            text = (para.get('text') or '').strip()
+            if not text:
+                continue
+            caveat = ""
+            if para.get('uncertain'):
+                caveat = (f"  (The scan lost a marker, so this block covers paragraphs "
+                          f"{label}. Introduce it as \"paragraphs {label}\".)\n")
+            block += (
+                f"\n  VERBATIM QUOTE — paragraph {label} of {title}. Reproduce this "
+                f"text EXACTLY as an indented block quote in the Grounds. Do NOT "
+                f"paraphrase, summarise, shorten, re-number or correct it:\n"
+                f"{caveat}"
+                f"  \"\"\"{text}\"\"\""
+            )
+        return block
 
     judgments_block = "\n".join(
         _fmt_judgment(r) for r in judgment_results[:5]
