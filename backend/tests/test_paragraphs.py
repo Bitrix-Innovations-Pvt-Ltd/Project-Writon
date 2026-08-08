@@ -12,6 +12,7 @@ from app.core.paragraphs import (
     find_markers,
     locate_chunk,
     paragraphs_for_span,
+    rank_paragraphs_by_query,
     segment,
     segment_window,
     _gap_fill,
@@ -355,6 +356,52 @@ def test_paragraphs_for_span_ignores_incidental_graze():
 
 def test_paragraphs_for_span_empty_span():
     assert paragraphs_for_span(_paras(), (500, 500)) == []
+
+
+# ---------------------------------------------------------------------------
+# rank_paragraphs_by_query — the BM25-only fallback
+# ---------------------------------------------------------------------------
+RANKING_PARAS = [
+    Paragraph(number=1, char_start=0, char_end=1,
+              text="1. Leave granted in the special leave petition."),
+    Paragraph(number=2, char_start=1, char_end=2,
+              text="2. The question is whether anticipatory bail may be granted "
+                   "where custodial interrogation is not required."),
+    Paragraph(number=3, char_start=2, char_end=3,
+              text="3. The appellant was appointed as a clerk in the year 1998 "
+                   "and superannuated thereafter."),
+    Paragraph(number=4, char_start=3, char_end=4,
+              text="4. Custodial interrogation of the accused in an economic "
+                   "offence is ordinarily unnecessary where records suffice."),
+]
+
+
+def test_ranking_puts_the_relevant_paragraph_first():
+    ranked = rank_paragraphs_by_query(
+        RANKING_PARAS, "anticipatory bail custodial interrogation economic offence")
+    assert ranked[0] in (2, 4)
+    assert 3 not in ranked[:2]
+
+
+def test_ranking_skips_paragraphs_with_no_overlap():
+    ranked = rank_paragraphs_by_query(RANKING_PARAS, "custodial interrogation")
+    assert 1 not in ranked
+
+
+def test_ranking_respects_top_k():
+    assert len(rank_paragraphs_by_query(RANKING_PARAS, "the appellant custodial "
+                                        "interrogation bail clerk", top_k=2)) == 2
+
+
+def test_ranking_ignores_generic_legal_words():
+    """"court", "learned counsel", "respondent" match everything and must not
+    drive the ranking — the same trap the judgment OR-fallback hit in rag.py."""
+    assert rank_paragraphs_by_query(RANKING_PARAS, "the court learned counsel") == []
+
+
+def test_ranking_with_empty_query_or_paragraphs():
+    assert rank_paragraphs_by_query(RANKING_PARAS, "") == []
+    assert rank_paragraphs_by_query([], "anticipatory bail") == []
 
 
 # ---------------------------------------------------------------------------

@@ -155,20 +155,45 @@ def build_uploaded_docs_context(docs: list[dict]) -> tuple[str, list[dict]]:
     # Re-uploads of the same content are collapsed first: they would otherwise
     # each consume a share of the budget and each appear as a separate entry in
     # the ANNEXURES list the model builds from this block.
-    usable = [
-        d for d in dedupe_docs(docs or [])
-        if is_usable_ocr(d.get("ocr_text"), MIN_DOC_CHARS)
+    deduped = dedupe_docs(docs or [])
+
+    # Filed vs narrated are different questions, and conflating them lost
+    # documents. ANNEXURES is a record of what was FILED: a document belongs
+    # there even if its text never reaches the model because the character budget
+    # ran out, because it lost the MAX_DOCS cut, or because its OCR came back too
+    # thin to narrate from. Only a blank template is genuinely not an annexure.
+    annexable = [
+        d for d in deduped
         # Blank pleading templates are excluded: they read as real documents but
         # their parties are placeholders, and the draft LLM would copy them.
-        and not looks_like_template(d.get("ocr_text") or "")
+        if not looks_like_template(d.get("ocr_text") or "")
     ]
-    if not usable:
+    if not annexable:
         return "", []
+
+    usable = [d for d in annexable if is_usable_ocr(d.get("ocr_text"), MIN_DOC_CHARS)]
 
     # Most probative documents first, so a total-cap overflow drops annexures
     # rather than the impugned order.
+    annexable.sort(key=doc_priority)
     usable.sort(key=doc_priority)
-    usable = usable[:MAX_DOCS]
+    narrated = usable[:MAX_DOCS]
+
+    dropped = [d for d in annexable if d not in narrated]
+    if dropped:
+        # Named, not silent: a document vanishing from the draft with no
+        # explanation is exactly the bug this reporting exists to surface.
+        print("[uploaded_docs] annexed but not narrated: " + "; ".join(
+            f"{(d.get('original_filename') or 'unknown')} "
+            f"({'thin OCR' if not is_usable_ocr(d.get('ocr_text'), MIN_DOC_CHARS) else 'over cap/budget'})"
+            for d in dropped
+        ))
+
+    # Nothing narratable at all means there is nothing to tell the model about,
+    # and the templates' ANNEXURES fallback covers the empty case.
+    if not narrated:
+        return "", []
+    usable = narrated
 
     # Share the budget across however many documents there are: one long
     # judgment gets all 48k rather than a fixed slice, while a full checklist
@@ -220,13 +245,29 @@ def build_uploaded_docs_context(docs: list[dict]) -> tuple[str, list[dict]]:
     # The date is left as a blank for the advocate: a document's own date is not
     # reliably recoverable from OCR, and a wrong date on an annexure is worse
     # than a blank one.
+    # Built from every filed document, not just the ones whose text fitted the
+    # budget. An annexure list that omits a document the advocate actually filed
+    # is wrong on the record, and the omission is invisible in the finished draft.
+    chars_by_id = {u["id"]: u["chars_used"] for u in used}
+    annexure_labels = unique_labels(annexable)
+    annexure_entries = [
+        {"id": d.get("id"),
+         "label": annexure_labels[i],
+         "filename": (d.get("original_filename") or "unknown").strip(),
+         # 0 means the document is annexed but its text never reached the model
+         # (thin OCR, or the character budget ran out before it).
+         "chars_used": chars_by_id.get(d.get("id"), 0),
+         "narrated": d.get("id") in chars_by_id}
+        for i, d in enumerate(annexable)
+    ]
+
     annexures = "\n".join(
-        f"**Annexure No. {i}** — The photo/type copy of {u['label']} dated __/__/____"
-        for i, u in enumerate(used, start=1)
+        f"**Annexure No. {i}** — The photo/type copy of {a['label']} dated __/__/____"
+        for i, a in enumerate(annexure_entries, start=1)
     )
     annexure_block = (
         "\n\n--- ANNEXURE LIST (reproduce EXACTLY as the ANNEXURES section, "
         "in this order, adding nothing) ---\n" + annexures
     )
 
-    return _HEADER + "\n\n".join(blocks) + annexure_block, used
+    return _HEADER + "\n\n".join(blocks) + annexure_block, annexure_entries

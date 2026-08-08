@@ -416,6 +416,9 @@ class JudgmentParagraphsRequest(BaseModel):
     # True returns every paragraph of the judgment instead of only the ones the
     # retrieved chunk matched. Segmentation costs ~8 ms either way.
     include_all: bool = False
+    # Only used when retrieval gave no chunk reference (a BM25-only hit): the
+    # judgment's paragraphs are ranked against this instead of all being listed.
+    query: str = ""
     disable_cache: bool = False
 
 
@@ -441,6 +444,7 @@ async def judgment_paragraphs(req: JudgmentParagraphsRequest):
             chunk_id=req.chunk_id,
             chunk_index=req.chunk_index,
             include_all=req.include_all,
+            query=req.query,
             disable_cache=req.disable_cache,
         )
     except Exception as exc:

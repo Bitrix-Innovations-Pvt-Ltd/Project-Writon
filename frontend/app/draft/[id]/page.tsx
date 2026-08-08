@@ -228,6 +228,10 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
   // Kept separate from selectedJudgmentIds: a judgment can be cited for its
   // holding without any paragraph being block-quoted.
   const [selectedParas, setSelectedParas] = useState<Map<number, Set<number>>>(new Map());
+  // Rewritten queries behind the current suggestions. Used only to rank
+  // paragraphs for judgments that retrieval matched on keywords alone and so
+  // carry no chunk reference to anchor a paragraph to.
+  const [citationQuery, setCitationQuery] = useState<string>('');
   
   // New Hierarchy States
   const [selectedCategory, setSelectedCategory] = useState<any>(null);
@@ -1123,6 +1127,9 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
         const data = await res.json();
         setSuggestedJudgments(data.judgments || []);
         setSuggestedStatutes(data.statutes || []);
+        // The first few rewritten queries carry the statutory + procedural core
+        // (same slice rag.py feeds the reranker).
+        setCitationQuery(((data.queries_used || []) as string[]).slice(0, 3).join(' '));
         
         // Select all statutes by default, but selectively pre-select judgments based on relevance.
         // Set<number> to match selectedJudgmentIds: retrieval emits a numeric `id`
@@ -2597,6 +2604,7 @@ export default function DraftWizard({ params }: { params: { id: string } }) {
                                 judgmentId={judgment.id}
                                 chunkId={judgment.chunk_id ?? null}
                                 chunkIndex={judgment.chunk_index ?? null}
+                                query={citationQuery}
                                 apiUrl={resolveApiUrl()}
                                 selected={selectedParas.get(judgment.id) ?? EMPTY_PARA_SET}
                                 onChange={(paras) => {

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from app.core.paragraphs import (
     Segmentation,
     locate_chunk_tiered,
     paragraphs_for_span,
+    rank_paragraphs_by_query,
     segment,
     segment_window,
 )
@@ -59,6 +61,15 @@ CLEANUP_MAX_PARAS = 4
 CLEANUP_TIMEOUT_S = 20
 
 CACHE_TTL_SECONDS = 6 * 3600
+
+# Paragraphs shown either side of a match. A quote usually needs the sentence
+# that set it up, and reopening the dropdown to find paragraph 42 after picking
+# 43 is friction for no reason.
+NEIGHBOUR_CONTEXT = 1
+
+# How many paragraphs to surface for a BM25-only judgment, where there is no
+# chunk to anchor to and the alternative is listing all of them unranked.
+RANKED_FALLBACK_PARAS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +267,7 @@ async def get_judgment_paragraphs(
     chunk_index: Optional[int] = None,
     include_all: bool = False,
     clean: bool = False,
+    query: str = "",
     disable_cache: bool = False,
 ) -> dict:
     """Return the paragraphs behind a retrieved citation.
@@ -266,12 +278,18 @@ async def get_judgment_paragraphs(
 
     ``clean`` runs the LLM tidy-up pass. Off for the picker (it costs 2-7s), on
     at generation time where the paragraph is about to be quoted.
+
+    ``query`` is only consulted when retrieval supplied no chunk reference, to
+    rank the judgment's paragraphs instead of listing every one of them.
     """
     from app.core.rag import _exec_raw
 
     cache_key = (
         f"judgment_paras:{judgment_id}:{chunk_id or 'x'}:{chunk_index if chunk_index is not None else 'x'}"
-        f":{int(include_all)}:{int(clean)}:v{SEGMENTER_VERSION}"
+        # md5, not hash(): PYTHONHASHSEED is randomised per process, so hash()
+        # would give each worker a different key for the same query.
+        f":{int(include_all)}:{int(clean)}"
+        f":{hashlib.md5((query or '').encode()).hexdigest()[:8]}:v{SEGMENTER_VERSION}"
     )
     if not disable_cache:
         try:
@@ -337,12 +355,31 @@ async def get_judgment_paragraphs(
         matched = paragraphs_for_span(seg.paragraphs, (start, end))
 
     selected: list[Paragraph]
-    if include_all or zone == "unknown":
-        # No chunk to narrow by — offer the whole judgment rather than an
-        # arbitrary opening slice the advocate would have to expand past anyway.
+    ranked: list[int] = []
+    if include_all:
         selected = seg.paragraphs
+    elif zone == "unknown":
+        # BM25-only judgment: there is no passage to anchor to. Rank the
+        # paragraphs against the search query rather than dumping all 112 of them
+        # in source order and leaving the advocate to hunt.
+        ranked = rank_paragraphs_by_query(seg.paragraphs, query, top_k=RANKED_FALLBACK_PARAS)
+        if ranked:
+            order = {n: i for i, n in enumerate(ranked)}
+            selected = sorted(
+                [p for p in seg.paragraphs if p.number in order],
+                key=lambda p: order[p.number],
+            )
+        else:
+            selected = seg.paragraphs
     elif matched:
-        selected = [p for p in seg.paragraphs if p.number in matched]
+        # Include the immediately neighbouring paragraphs as context. A quote
+        # often needs the sentence that set it up, and re-opening the dropdown to
+        # hunt for paragraph 42 after picking 43 is needless friction.
+        lo, hi = min(matched), max(matched)
+        selected = [
+            p for p in seg.paragraphs
+            if lo - NEIGHBOUR_CONTEXT <= p.number <= hi + NEIGHBOUR_CONTEXT
+        ]
     else:
         # Front matter (headnote/cause title) — ~19% of chunks. No numbered
         # paragraph matched, so offer the opening paragraphs of the judgment
@@ -367,6 +404,10 @@ async def get_judgment_paragraphs(
     for idx, para in enumerate(selected):
         item = para.to_dict()
         item["is_match"] = para.number in matched
+        # Ranked by query terms because there was no chunk to match against.
+        item["is_ranked"] = para.number in ranked
+        # A neighbour pulled in for context, not something retrieval matched.
+        item["is_context"] = bool(matched) and para.number not in matched
         item["cleaned"] = idx in cleaned_by_index
         if idx in cleaned_by_index:
             item["text"] = cleaned_by_index[idx]

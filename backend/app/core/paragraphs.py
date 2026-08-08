@@ -464,6 +464,56 @@ def paragraphs_for_span(
     return hits
 
 
+# Words too common in judgments to discriminate between paragraphs. Scoring on
+# them ranks every paragraph equally, which is the failure mode the judgment
+# OR-fallback hit in rag.py (generic terms matched 98.7% of the corpus).
+_RANK_STOPWORDS = {
+    "the", "of", "and", "to", "in", "a", "is", "that", "for", "it", "as", "on",
+    "with", "was", "by", "be", "this", "which", "or", "an", "are", "has", "have",
+    "not", "been", "from", "at", "any", "under", "shall", "would", "may", "such",
+    "court", "case", "said", "learned", "counsel", "appellant", "respondent",
+    "petitioner", "judgment", "order", "hon", "ble", "held", "section", "act",
+}
+
+
+def rank_paragraphs_by_query(
+    paragraphs: list[Paragraph],
+    query: str,
+    top_k: int = 5,
+) -> list[int]:
+    """Paragraph numbers most relevant to *query*, best first.
+
+    Used when retrieval gives no chunk to anchor to — a judgment that surfaced on
+    BM25 alone has no passage reference, and listing all 112 paragraphs
+    unranked leaves the advocate to find the relevant one by hand.
+
+    Deliberately a cheap term-overlap score, not an embedding: the paragraphs are
+    already in memory, so this costs nothing, and it only has to order paragraphs
+    within a single judgment that retrieval has already judged relevant.
+    """
+    terms = {
+        t for t in _RE_NON_ALNUM.sub(" ", (query or "").lower()).split()
+        if len(t) > 3 and t not in _RANK_STOPWORDS
+    }
+    if not terms or not paragraphs:
+        return []
+
+    scored: list[tuple[float, int]] = []
+    for para in paragraphs:
+        words = _RE_NON_ALNUM.sub(" ", para.text.lower()).split()
+        if not words:
+            continue
+        hits = sum(1 for w in set(words) if w in terms)
+        if not hits:
+            continue
+        # Normalise by length so a long paragraph does not win on volume alone,
+        # but keep a floor so a one-line paragraph with one hit cannot top the list.
+        scored.append((hits / (1 + len(words) / 400), para.number))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [number for _, number in scored[:top_k]]
+
+
 def segment_window(
     chunk_texts: list[str],
     target_position: int,

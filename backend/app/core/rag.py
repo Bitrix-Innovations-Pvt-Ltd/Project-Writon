@@ -1422,6 +1422,15 @@ RERANK_LLM_MODEL = os.getenv("RAG_RERANK_LLM_MODEL", "openai/gpt-4o-mini")
 # ~18k characters per call. Trimming both is the cheapest way to buy back the
 # latency the LLM reranker costs over the cross-encoder.
 RERANK_CANDIDATES = int(os.getenv("RAG_RERANK_CANDIDATES", "15"))
+
+# How many judgments WITHOUT a hand-picked quote reach the prompt. Judgments the
+# advocate picked paragraphs from are always included on top of this.
+#
+# 8, not 5, because that is how many suggest-citations offers (top_ks) and so how
+# many the advocate can tick. At 5 an explicit selection of 6-8 authorities was
+# silently cut down to the 5 the reranker liked best.
+JUDGMENTS_IN_PROMPT = int(os.getenv("RAG_JUDGMENTS_IN_PROMPT", "8"))
+STATUTES_IN_PROMPT = int(os.getenv("RAG_STATUTES_IN_PROMPT", "8"))
 RERANK_SNIPPET_CHARS = int(os.getenv("RAG_RERANK_SNIPPET_CHARS", "250"))
 
 
@@ -1613,7 +1622,7 @@ def assemble_prompt(
 
     statutes_block = "\n".join(
         f"- {r['title']}:\n  {r['text'][:600]}"
-        for r in statute_results[:5]
+        for r in statute_results[:STATUTES_IN_PROMPT]
     ) or "[No statute sections retrieved]"
 
     # Bug 1b fix: include case_number + year prominently so LLM cites the right identifier.
@@ -1652,8 +1661,17 @@ def assemble_prompt(
             )
         return block
 
+    # A judgment whose paragraphs the advocate ticked is never dropped. The block
+    # used to be a flat judgment_results[:5], which silently discarded everything
+    # the advocate selected beyond the fifth — and because Step 6 lists judgments
+    # in rerank order, the casualties were exactly the low-relevance ones a user
+    # deliberately went and picked a paragraph from.
+    _quoted = [r for r in judgment_results if r.get("quoted_paragraph_texts")]
+    _unquoted = [r for r in judgment_results if not r.get("quoted_paragraph_texts")]
+    _selected = _quoted + _unquoted[:max(0, JUDGMENTS_IN_PROMPT - len(_quoted))]
+
     judgments_block = "\n".join(
-        _fmt_judgment(r) for r in judgment_results[:5]
+        _fmt_judgment(r) for r in _selected
     ) or "[No precedents retrieved]"
 
     court_display  = form_data.get("court_display", "the court")

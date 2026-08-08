@@ -172,6 +172,33 @@ def test_multiple_quoted_paragraphs_all_render():
 _RENDERED_QUOTE_MARKER = "Reproduce this text EXACTLY"
 
 
+def test_low_ranked_judgment_with_a_quote_is_never_truncated():
+    """Regression: the prompt took a flat judgment_results[:5].
+
+    Step 6 lists judgments in rerank order, so anything the advocate ticked
+    beyond the fifth was silently dropped — and the casualties were exactly the
+    low-relevance authorities a user deliberately went and picked a paragraph
+    from. The quote must survive regardless of rank.
+    """
+    from app.core.rag import assemble_prompt
+
+    filler = [{**JUDGMENT, "id": i, "title": f"Filler Case {i}"} for i in range(9)]
+    picked = {**JUDGMENT, "id": 99, "title": "Low Relevance Authority",
+              "quoted_paragraph_texts": [
+                  {"label": "43", "text": PARA_TEXT, "uncertain": False}]}
+
+    prompt = assemble_prompt(
+        {"document_type": "Anticipatory Bail", "document_type_key": "anticipatory_bail",
+         "court_display": "High Court", "subject_matter": "Criminal Law",
+         "petitioners": ["A"], "respondents": ["B"], "facts_of_case": "F",
+         "grounds": "", "relief_sought": "R", "mandatory_paragraphs": "",
+         "dates_and_events": []},
+        filler + [picked], [STATUTE], uploaded_docs_context="",
+    )
+    assert "Low Relevance Authority" in prompt
+    assert PARA_TEXT in prompt
+
+
 def test_judgment_without_quotes_is_unchanged():
     """Citations with no paragraph picked must render exactly as before."""
     prompt = _prompt_for(JUDGMENT)

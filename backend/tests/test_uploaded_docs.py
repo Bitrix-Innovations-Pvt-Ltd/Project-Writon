@@ -103,10 +103,38 @@ def test_impugned_order_survives_total_cap():
 
 
 def test_respects_total_and_doc_caps():
+    """The caps bound what is NARRATED to the model, not what is annexed."""
     docs = [_doc(i, "x" * 40_000) for i in range(20)]
     block, used = build_uploaded_docs_context(docs)
-    assert len(used) <= MAX_DOCS
+    narrated = [u for u in used if u["narrated"]]
+    assert len(narrated) <= MAX_DOCS
     assert sum(u["chars_used"] for u in used) <= TOTAL_CHARS
+
+
+def test_every_filed_document_is_annexed():
+    """MAX_DOCS is a prompt-budget guard, not a filing limit. A document the
+    advocate filed must appear in ANNEXURES even when its text never reached the
+    model — an annexure list that silently omits a filed document is wrong on
+    the record, and the omission is invisible in the finished draft."""
+    docs = [_doc(i, "x" * 40_000) for i in range(20)]
+    _, used = build_uploaded_docs_context(docs)
+    assert len(used) == 20
+    assert sum(1 for u in used if not u["narrated"]) == 12
+
+
+def test_thin_ocr_document_is_still_annexed():
+    """A poor scan is still a filed document. Its text cannot be narrated, but
+    dropping it from ANNEXURES loses it from the record entirely."""
+    # unique=False on the thin one: the id prefix would push it back over
+    # MIN_DOC_CHARS and it would be narrated after all.
+    docs = [_doc(1, "y" * 4000, doc_type="Impugned Order"),
+            _doc(2, "z" * (MIN_DOC_CHARS - 1), doc_type="Identity Proof",
+                 unique=False)]
+    _, used = build_uploaded_docs_context(docs)
+    assert len(used) == 2
+    thin = next(u for u in used if u["id"] == 2)
+    assert thin["narrated"] is False
+    assert thin["chars_used"] == 0
 
 
 def test_long_document_keeps_head_and_tail():

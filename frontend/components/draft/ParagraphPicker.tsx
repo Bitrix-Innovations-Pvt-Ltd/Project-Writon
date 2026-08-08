@@ -23,6 +23,10 @@ export interface JudgmentParagraph {
   number_uncertain: boolean;
   text: string;
   is_match: boolean;
+  // Surfaced by keyword ranking because retrieval gave no passage to anchor to.
+  is_ranked: boolean;
+  // A neighbouring paragraph included for context, not itself a match.
+  is_context: boolean;
   suspect_merge: boolean;
   marker_observed: boolean;
 }
@@ -47,6 +51,8 @@ interface Props {
   selected: Set<number>;
   onChange: (paraNumbers: Set<number>) => void;
   apiUrl: string;
+  /** Search query, used only to rank paragraphs when there is no chunk match. */
+  query?: string;
 }
 
 export default function ParagraphPicker({
@@ -56,6 +62,7 @@ export default function ParagraphPicker({
   selected,
   onChange,
   apiUrl,
+  query = '',
 }: Props) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -75,6 +82,7 @@ export default function ParagraphPicker({
           chunk_id: chunkId ?? null,
           chunk_index: chunkIndex ?? null,
           include_all: includeAll,
+          query,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -84,7 +92,7 @@ export default function ParagraphPicker({
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, judgmentId, chunkId, chunkIndex]);
+  }, [apiUrl, judgmentId, chunkId, chunkIndex, query]);
 
   // Fetch on first expand only — the endpoint costs a round trip, and Step 6
   // already spends 20-25s before this card is even visible.
@@ -147,10 +155,13 @@ export default function ParagraphPicker({
 
               {data?.zone === 'unknown' && (
                 <p className="text-[11px] text-on-surface-variant bg-surface-container-low rounded-lg p-2">
-                  This judgment was matched on keywords rather than a specific
-                  passage, so no single paragraph is highlighted. All{' '}
-                  {data?.total_paragraphs} paragraphs are listed — pick the ones
-                  you want quoted.
+                  {paragraphs.some(p => p.is_ranked)
+                    ? <>This judgment was matched on keywords rather than one
+                        passage. The paragraphs closest to your case are shown
+                        first — or list all {data?.total_paragraphs} below.</>
+                    : <>This judgment was matched on keywords rather than one
+                        passage, so no paragraph is singled out. All{' '}
+                        {data?.total_paragraphs} are listed.</>}
                 </p>
               )}
 
@@ -179,6 +190,22 @@ export default function ParagraphPicker({
                         {para.is_match && (
                           <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-green-100 text-green-800">
                             Matched
+                          </span>
+                        )}
+                        {para.is_context && (
+                          <span
+                            className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-surface-container-high text-on-surface-variant"
+                            title="Shown for context — this paragraph adjoins the matched one."
+                          >
+                            Context
+                          </span>
+                        )}
+                        {para.is_ranked && (
+                          <span
+                            className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-blue-100 text-blue-800"
+                            title="Ranked by keyword overlap with your case — retrieval did not match a specific passage of this judgment."
+                          >
+                            Likely
                           </span>
                         )}
                         {para.number_uncertain && (
